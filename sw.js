@@ -1,4 +1,4 @@
-const CACHE_NAME = 'koha-tracker-v2';
+const CACHE_NAME = 'koha-tracker-v3';
 const APP_SHELL = [
   './',
   './index.html',
@@ -32,16 +32,16 @@ self.addEventListener('fetch', event => {
   if (url.hostname.endsWith('supabase.co')) return;
   if (event.request.method !== 'GET') return;
 
+  // Network-first: always try to get the latest app code when online, so
+  // updates to the app show up immediately instead of being stuck on an
+  // old cached version. Only fall back to the cache when offline.
   event.respondWith(
-    caches.match(event.request).then(cached => {
-      const network = fetch(event.request).then(res => {
-        if (res && res.status === 200) {
-          const copy = res.clone();
-          caches.open(CACHE_NAME).then(cache => cache.put(event.request, copy));
-        }
-        return res;
-      }).catch(() => cached);
-      return cached || network;
-    })
+    fetch(event.request).then(res => {
+      if (res && res.status === 200) {
+        const copy = res.clone();
+        caches.open(CACHE_NAME).then(cache => cache.put(event.request, copy));
+      }
+      return res;
+    }).catch(() => caches.match(event.request))
   );
 });

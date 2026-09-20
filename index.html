@@ -305,6 +305,7 @@
 <footer class="hint no-print" id="footerHint">Shared live across everyone using this app · works offline and syncs when back online.</footer>
 
 <div id="modalRoot"></div>
+<input type="file" id="restoreFileInput" accept="application/json,.json" style="display:none" onchange="handleRestoreFile(event)" />
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <script>
@@ -754,6 +755,116 @@ function exportCSV(t){
   URL.revokeObjectURL(url);
 }
 
+/* ---------- Backup / Restore ---------- */
+function backupRestoreCardHtml(){
+  return `
+    <div class="card no-print">
+      <h2>Backup &amp; Restore</h2>
+      <p class="muted" style="margin-top:0;">Back up every hui, koha entry and expense to a file, or restore from one.</p>
+      <div class="toolbar" style="margin-top:10px;">
+        <button class="btn btn-ghost btn-sm" onclick="backupData()">⬇ Backup All Data</button>
+        <button class="btn btn-ghost btn-sm" onclick="document.getElementById('restoreFileInput').click()">⬆ Restore from Backup</button>
+      </div>
+    </div>
+  `;
+}
+
+function backupData(){
+  const data = { app:'koha-tracker', version:1, exportedAt: new Date().toISOString(), hui: state.hui };
+  const blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const stamp = new Date().toISOString().slice(0,10);
+  a.href = url;
+  a.download = `koha-tracker-backup-${stamp}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function handleRestoreFile(event){
+  const file = event.target.files[0];
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    let data;
+    try{
+      data = JSON.parse(reader.result);
+    }catch(e){
+      alert("That file doesn't look like a valid backup (not valid JSON).");
+      event.target.value = '';
+      return;
+    }
+    if(!data || !Array.isArray(data.hui)){
+      alert("That file doesn't look like a valid Koha Tracker backup.");
+      event.target.value = '';
+      return;
+    }
+    const huiCount = data.hui.length;
+    const entryCount = data.hui.reduce((sum,t)=> sum + (t.entries||[]).length, 0);
+    const expenseCount = data.hui.reduce((sum,t)=> sum + (t.expenses||[]).length, 0);
+    const ok = confirm(
+      `Restore ${huiCount} hui, ${entryCount} koha entries and ${expenseCount} expenses from this backup?\n\n` +
+      `This merges into what's already here — matching records are updated, nothing currently here is deleted — and re-syncs it all to everyone else.`
+    );
+    if(!ok){ event.target.value = ''; return; }
+    restoreBackup(data);
+    event.target.value = '';
+  };
+  reader.onerror = () => alert("Couldn't read that file.");
+  reader.readAsText(file);
+}
+
+function restoreBackup(data){
+  data.hui.forEach(t=>{
+    if(!t || !t.id || !t.name) return;
+    let existing = getHui(t.id);
+    if(!existing){
+      existing = { id:t.id, name:t.name, date:t.date||new Date().toISOString().slice(0,10), location:t.location||'', status:t.status||'open', entries:[], expenses:[] };
+      state.hui.push(existing);
+    } else {
+      existing.name = t.name;
+      existing.date = t.date || existing.date;
+      existing.location = t.location || '';
+      existing.status = t.status || existing.status;
+    }
+    enqueue({ type:'upsert_hui', payload: huiToRow(existing) });
+
+    (t.entries||[]).forEach(e=>{
+      if(!e || !e.id || !e.name) return;
+      let ex = existing.entries.find(x=>x.id===e.id);
+      const fields = {
+        name:e.name, type:e.type||'cash', amount:Number(e.amount)||0,
+        foodDesc:e.foodDesc||'', note:e.note||'', date:e.date||existing.date
+      };
+      if(!ex){
+        ex = Object.assign({ id:e.id, ts: e.ts||Date.now() }, fields);
+        existing.entries.push(ex);
+      } else {
+        Object.assign(ex, fields);
+      }
+      enqueue({ type:'upsert_entry', payload: entryToRow(existing.id, ex) });
+    });
+
+    (t.expenses||[]).forEach(x=>{
+      if(!x || !x.id || !x.description) return;
+      let exx = existing.expenses.find(y=>y.id===x.id);
+      const fields = { description:x.description, amount:Number(x.amount)||0, date:x.date||existing.date };
+      if(!exx){
+        exx = Object.assign({ id:x.id, ts: x.ts||Date.now() }, fields);
+        existing.expenses.push(exx);
+      } else {
+        Object.assign(exx, fields);
+      }
+      enqueue({ type:'upsert_expense', payload: expenseToRow(existing.id, exx) });
+    });
+  });
+  saveState();
+  render();
+  alert('Backup restored.');
+}
+
 /* ---------- Modals ---------- */
 function showModal(html){
   document.getElementById('modalRoot').innerHTML = `
@@ -823,21 +934,13 @@ function entryModal(entry, editingId){
     <label>Date</label>
     <input type="date" id="eDate" value="${entry.date || ''}" />
 
-    <label>Koha type</label>
-    <div class="type-toggle" id="typeToggle">
-      <button type="button" data-type="cash" class="${entry.type==='cash'?'active':''}">💵 Cash</button>
-      <button type="button" data-type="food" class="${entry.type==='food'?'active':''}">🍽️ Food</button>
-      <button type="button" data-type="both" class="${entry.type==='both'?'active':''}">Both</button>
-    </div>
+    <label>💵 Cash amount ($NZD) <span class="field-hint">(leave blank if none)</span></label>
+    <input type="number" id="eAmount" inputmode="decimal" min="0" step="0.01" placeholder="0.00" value="${entry.amount ? entry.amount : ''}"/>
 
-    <div id="cashField" style="display:${entry.type==='food' ? 'none':'block'};">
-      <label>Amount ($NZD)</label>
-      <input type="number" id="eAmount" inputmode="decimal" min="0" step="0.01" placeholder="0.00" value="${entry.amount ? entry.amount : ''}"/>
-    </div>
-    <div id="foodField" style="display:${entry.type==='cash' ? 'none':'block'};">
-      <label>Food / item description</label>
-      <textarea id="eFood" placeholder="e.g. 2 trays boil-up, sacks of potatoes">${escapeHtml(entry.foodDesc||'')}</textarea>
-    </div>
+    <label>🍽️ Food / item description <span class="field-hint">(leave blank if none)</span></label>
+    <textarea id="eFood" placeholder="e.g. 2 trays boil-up, sacks of potatoes">${escapeHtml(entry.foodDesc||'')}</textarea>
+    ${!isEdit ? '<p class="field-hint">Fill in both cash and food and they\'ll be added as two separate koha entries.</p>' : ''}
+
     <label>Note <span class="field-hint">(optional)</span></label>
     <input type="text" id="eNote" placeholder="optional note" value="${escapeHtml(entry.note||'')}" />
 
@@ -845,39 +948,36 @@ function entryModal(entry, editingId){
       <button class="btn btn-primary btn-block" onclick="submitEntry()">${isEdit ? 'Save Changes' : 'Add'}</button>
     </div>
   `);
-  const toggle = document.getElementById('typeToggle');
-  toggle.querySelectorAll('button').forEach(b=>{
-    b.addEventListener('click', ()=>{
-      toggle.querySelectorAll('button').forEach(x=>x.classList.remove('active'));
-      b.classList.add('active');
-      const type = b.dataset.type;
-      document.getElementById('cashField').style.display = (type==='food') ? 'none':'block';
-      document.getElementById('foodField').style.display = (type==='cash') ? 'none':'block';
-    });
-  });
   setTimeout(()=>document.getElementById('eName').focus(), 50);
 }
 function submitEntry(){
   const editingId = document.getElementById('eEditingId').value;
   const name = document.getElementById('eName').value.trim();
   const date = document.getElementById('eDate').value;
-  const type = document.querySelector('#typeToggle button.active').dataset.type;
-  const amount = document.getElementById('eAmount') ? document.getElementById('eAmount').value : '';
-  const foodDesc = document.getElementById('eFood') ? document.getElementById('eFood').value.trim() : '';
+  const amount = document.getElementById('eAmount').value;
+  const foodDesc = document.getElementById('eFood').value.trim();
   const note = document.getElementById('eNote').value.trim();
+  const hasCash = amount && Number(amount) > 0;
+  const hasFood = !!foodDesc;
+
   if(!name){ alert('Please enter who the koha is from.'); return; }
-  if((type==='cash'||type==='both') && (!amount || Number(amount)<=0)){
-    if(!confirm('No amount entered for cash koha — save anyway with $0.00?')) return;
-  }
-  if((type==='food'||type==='both') && !foodDesc){
-    if(!confirm('No food/item description entered — save anyway?')) return;
-  }
+  if(!hasCash && !hasFood){ alert('Please enter a cash amount, a food description, or both.'); return; }
+
   closeModal();
-  const fields = {name, date, type, amount: Number(amount)||0, foodDesc, note};
+
   if(editingId){
-    updateEntry(currentHuiId, editingId, fields);
+    // Editing a single existing entry — keep it as one record, whichever
+    // fields it now has (cash, food, or both).
+    const type = hasCash && hasFood ? 'both' : hasCash ? 'cash' : 'food';
+    updateEntry(currentHuiId, editingId, {name, date, type, amount: Number(amount)||0, foodDesc, note});
+  } else if(hasCash && hasFood){
+    // New entry with both — record as two separate koha entries.
+    addEntry(currentHuiId, {name, date, type:'cash', amount: Number(amount)||0, foodDesc:'', note});
+    addEntry(currentHuiId, {name, date, type:'food', amount: 0, foodDesc, note});
+  } else if(hasCash){
+    addEntry(currentHuiId, {name, date, type:'cash', amount: Number(amount)||0, foodDesc:'', note});
   } else {
-    addEntry(currentHuiId, fields);
+    addEntry(currentHuiId, {name, date, type:'food', amount: 0, foodDesc, note});
   }
 }
 
@@ -963,6 +1063,7 @@ function renderHome(){
         <p class="muted">No koha records yet. Start your first hui record below.</p>
       </div>
       <button class="btn btn-primary btn-block" onclick="newHuiModal()">+ Start New Hui</button>
+      ${backupRestoreCardHtml()}
     `;
   }
   const sorted = [...state.hui].sort((a,b)=> (b.date||'').localeCompare(a.date||''));
@@ -983,6 +1084,7 @@ function renderHome(){
     <div class="card" style="padding:6px 14px;">
       ${items}
     </div>
+    ${backupRestoreCardHtml()}
   `;
 }
 
@@ -1174,7 +1276,25 @@ if(isIOS() && !isStandalone()){
 
 if('serviceWorker' in navigator){
   window.addEventListener('load', ()=>{
-    navigator.serviceWorker.register('sw.js').catch(err=>console.warn('SW registration failed', err));
+    navigator.serviceWorker.register('sw.js').then(reg => {
+      // Check for a newer sw.js/app whenever this tab/app is opened or
+      // brought back to the foreground, not just on a fresh page load.
+      document.addEventListener('visibilitychange', () => {
+        if(document.visibilityState === 'visible') reg.update().catch(()=>{});
+      });
+      window.addEventListener('focus', () => reg.update().catch(()=>{}));
+
+      // Once a newer service worker takes over, the page it's controlling
+      // is still running the OLD code in memory — reload once so the
+      // person actually sees the update, instead of it sitting there
+      // unused until their next manual refresh.
+      let reloadedForUpdate = false;
+      navigator.serviceWorker.addEventListener('controllerchange', () => {
+        if(reloadedForUpdate) return;
+        reloadedForUpdate = true;
+        window.location.reload();
+      });
+    }).catch(err=>console.warn('SW registration failed', err));
   });
 }
 

@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
+<title>Koha Tracker — View Only</title>
+<meta name="description" content="View-only koha totals and read-out summaries — nothing here can be edited.">
+<meta name="theme-color" content="#7a4a2b">
+<style>
+  :root{
+    --bg:#faf7f2;
+    --panel:#ffffff;
+    --ink:#2b2420;
+    --ink-soft:#6b6259;
+    --line:#e6ddd0;
+    --brown:#7a4a2b;
+    --brown-dark:#5c3620;
+    --green:#3f6b4a;
+    --green-soft:#e8f0e9;
+    --gold:#b9862f;
+    --gold-soft:#faf1de;
+    --red:#a4433a;
+    --radius:14px;
+    --shadow:0 2px 10px rgba(60,40,20,0.08);
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    background:var(--bg);
+    color:var(--ink);
+    -webkit-tap-highlight-color:transparent;
+  }
+  header{
+    background:linear-gradient(135deg,var(--brown) 0%,var(--brown-dark) 100%);
+    color:#fff;
+    padding:18px 20px;
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    position:sticky;
+    top:0;
+    z-index:20;
+    box-shadow:var(--shadow);
+    gap:10px;
+  }
+  header .title{display:flex;flex-direction:column;min-width:0;}
+  header h1{margin:0;font-size:1.15rem;font-weight:700;letter-spacing:.2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  header .subtitle{font-size:.78rem;opacity:.85;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  header .right{display:flex;align-items:center;gap:8px;flex-shrink:0;}
+  header button.nav-btn{
+    background:rgba(255,255,255,0.15);
+    border:1px solid rgba(255,255,255,0.35);
+    color:#fff;
+    padding:8px 14px;
+    border-radius:10px;
+    font-size:.85rem;
+    cursor:pointer;
+    white-space:nowrap;
+  }
+  header button.nav-btn:active{background:rgba(255,255,255,0.3);}
+  .sync-pill{
+    display:flex;
+    align-items:center;
+    gap:6px;
+    background:rgba(255,255,255,0.12);
+    border:1px solid rgba(255,255,255,0.3);
+    padding:6px 10px;
+    border-radius:20px;
+    font-size:.72rem;
+    color:#fff;
+    white-space:nowrap;
+  }
+  .sync-dot{
+    width:8px;height:8px;border-radius:50%;
+    background:#8fd19e;
+    flex-shrink:0;
+  }
+  .sync-dot.offline{background:#e0a24a;}
+  .sync-dot.syncing{background:#f2d16b;animation:pulse 1s infinite;}
+  .sync-dot.error{background:#e26b5f;}
+  @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.35;}}
+  main{
+    max-width:760px;
+    margin:0 auto;
+    padding:16px 14px 60px;
+  }
+  .card{
+    background:var(--panel);
+    border-radius:var(--radius);
+    box-shadow:var(--shadow);
+    padding:18px;
+    margin-bottom:16px;
+    border:1px solid var(--line);
+  }
+  .card h2{margin:0 0 4px;font-size:1.05rem;}
+  .muted{color:var(--ink-soft);font-size:.85rem;}
+  .btn{
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    gap:6px;
+    border:none;
+    border-radius:12px;
+    padding:13px 18px;
+    font-size:.95rem;
+    font-weight:600;
+    cursor:pointer;
+    transition:transform .05s;
+  }
+  .btn:active{transform:scale(0.97);}
+  .btn-primary{background:var(--brown);color:#fff;}
+  .btn-ghost{background:transparent;color:var(--brown);border:1.5px solid var(--brown);}
+  .btn-sm{padding:8px 12px;font-size:.8rem;border-radius:9px;}
+  .badge{
+    font-size:.7rem;
+    font-weight:700;
+    padding:3px 9px;
+    border-radius:20px;
+    text-transform:uppercase;
+    letter-spacing:.3px;
+  }
+  .badge-open{background:var(--green-soft);color:var(--green);}
+  .badge-closed{background:#eee;color:#888;}
+  .badge-view{background:var(--gold-soft);color:var(--brown-dark);}
+  .empty{
+    text-align:center;
+    padding:40px 20px;
+    color:var(--ink-soft);
+  }
+  .hui-item{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    padding:14px 4px;
+    border-bottom:1px solid var(--line);
+    cursor:pointer;
+  }
+  .hui-item:last-child{border-bottom:none;}
+  .hui-item:active{background:var(--gold-soft);}
+  .hui-item .info strong{display:block;font-size:1rem;}
+  .hui-item .info span{font-size:.8rem;color:var(--ink-soft);}
+  .totals-strip{
+    display:flex;
+    gap:10px;
+    margin:6px 0 4px;
+  }
+  .total-box{
+    flex:1;
+    background:var(--gold-soft);
+    border:1px solid #eddcb8;
+    border-radius:12px;
+    padding:12px 14px;
+    text-align:center;
+  }
+  .total-box .amt{font-size:1.35rem;font-weight:800;color:var(--brown-dark);}
+  .total-box .lbl{font-size:.72rem;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.4px;}
+  .summary-list{list-style:none;margin:0;padding:0;counter-reset:koha;}
+  .summary-list li{
+    counter-increment:koha;
+    padding:13px 4px;
+    border-bottom:1px solid var(--line);
+    display:flex;
+    justify-content:space-between;
+    align-items:baseline;
+    gap:8px;
+  }
+  .summary-list li::before{
+    content:counter(koha) ".";
+    color:var(--ink-soft);
+    font-weight:600;
+    margin-right:8px;
+    font-variant-numeric:tabular-nums;
+  }
+  .summary-list .sname{flex:1;font-weight:700;}
+  .summary-list .samt{font-weight:800;color:var(--brown-dark);white-space:nowrap;}
+  .summary-list .sfood{display:block;font-size:.8rem;font-weight:400;color:var(--ink-soft);margin-top:2px;}
+  .toolbar{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px;}
+  footer.hint{
+    text-align:center;color:var(--ink-soft);font-size:.75rem;padding:8px 20px 30px;
+  }
+  @media print{
+    header,.toolbar,.no-print{display:none !important;}
+    body{background:#fff;}
+    main{padding:0;max-width:100%;}
+    .card{box-shadow:none;border:none;padding:0;}
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="title">
+    <h1 id="headerTitle">Koha Tracker</h1>
+    <div class="subtitle" id="headerSubtitle">View only</div>
+  </div>
+  <div class="right no-print">
+    <div class="sync-pill" id="syncPill" title="Sync status">
+      <span class="sync-dot" id="syncDot"></span>
+      <span id="syncText">Loading…</span>
+    </div>
+    <button class="nav-btn" id="navBtn" onclick="goHome()" style="display:none;">← All Hui</button>
+  </div>
+</header>
+
+<main id="app">
+  <div class="card empty"><p class="muted">Loading…</p></div>
+</main>
+
+<footer class="hint no-print">View only — nothing on this page can be added, edited or deleted. For a hui summary read-out or a projector/second screen.</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script>
+/* ================= Config (same project as the main app — read-only here) ================= */
+const SUPABASE_URL = 'https://mmfaofgvueqfqygzxwfm.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_BZyJdhPfnAcVFyTNUMM7XQ_5WyNS88c';
+
+const sb = (SUPABASE_URL && SUPABASE_KEY && window.supabase)
+  ? window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY)
+  : null;
+
+let state = { hui: [] };
+let currentHuiId = null;
+let view = 'home'; // home | hui
+
+function money(n){
+  const v = Number(n)||0;
+  return '$' + v.toLocaleString('en-NZ', {minimumFractionDigits:2, maximumFractionDigits:2});
+}
+function fmtDate(d){
+  if(!d) return '';
+  const dt = new Date(d + 'T00:00:00');
+  if(isNaN(dt)) return d;
+  return dt.toLocaleDateString('en-NZ', {day:'numeric', month:'short', year:'numeric'});
+}
+function escapeHtml(s){
+  return String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function getHui(id){ return state.hui.find(t=>t.id===id); }
+function huiTotals(t){
+  let cash = 0, foodCount = 0;
+  t.entries.forEach(e=>{
+    if(e.type==='cash' || e.type==='both') cash += Number(e.amount)||0;
+    if(e.type==='food' || e.type==='both') foodCount += 1;
+  });
+  const expenses = (t.expenses||[]).reduce((sum,ex)=> sum + (Number(ex.amount)||0), 0);
+  return {cash, foodCount, total: t.entries.length, expenses, net: cash - expenses};
+}
+
+/* ================= Sync status UI ================= */
+function setSyncState(s){
+  const dot = document.getElementById('syncDot');
+  const text = document.getElementById('syncText');
+  if(!dot) return;
+  dot.className = 'sync-dot' + (s==='online' ? '' : ' '+s);
+  const labels = {online:'Live', offline:'Can’t reach server', syncing:'Loading…', error:'Can’t reach server'};
+  text.textContent = sb ? labels[s] : 'Not connected';
+}
+
+/* ================= Navigation ================= */
+function goHome(){ view='home'; currentHuiId=null; render(); }
+function openHui(id){ currentHuiId = id; view = 'hui'; render(); }
+
+/* ================= Read-only data load ================= */
+async function loadAll(){
+  if(!sb){ setSyncState('error'); render(); return; }
+  setSyncState('syncing');
+  try{
+    const [huiRes, entriesRes, expensesRes] = await Promise.all([
+      sb.from('hui').select('*').order('created_at', {ascending:true}),
+      sb.from('koha_entries').select('*').order('created_at', {ascending:true}),
+      sb.from('hui_expenses').select('*').order('created_at', {ascending:true})
+    ]);
+    if(huiRes.error) throw huiRes.error;
+    if(entriesRes.error) throw entriesRes.error;
+    if(expensesRes.error) throw expensesRes.error;
+
+    const byId = {};
+    huiRes.data.forEach(row=>{
+      byId[row.id] = { id:row.id, name:row.name, date:row.date, location:row.location||'', status:row.status, entries:[], expenses:[] };
+    });
+    entriesRes.data.forEach(row=>{
+      const t = byId[row.hui_id];
+      if(!t) return;
+      const ts = row.created_at ? new Date(row.created_at).getTime() : Date.now();
+      const date = row.date || (row.created_at ? row.created_at.slice(0,10) : '');
+      t.entries.push({ id:row.id, name:row.name, type:row.type, amount:row.amount, foodDesc:row.food_desc||'', note:row.note||'', date, ts });
+    });
+    expensesRes.data.forEach(row=>{
+      const t = byId[row.hui_id];
+      if(!t) return;
+      const ts = row.created_at ? new Date(row.created_at).getTime() : Date.now();
+      const date = row.date || (row.created_at ? row.created_at.slice(0,10) : '');
+      t.expenses.push({ id:row.id, description:row.description||'', amount:row.amount, date, ts });
+    });
+
+    state.hui = Object.values(byId);
+    setSyncState('online');
+    render();
+    subscribeRealtime();
+  }catch(err){
+    console.warn('view load failed', err);
+    setSyncState('error');
+    render();
+  }
+}
+
+let realtimeSubbed = false;
+let reloadTimer = null;
+function scheduleReload(){
+  clearTimeout(reloadTimer);
+  reloadTimer = setTimeout(loadAll, 400); // debounce bursts of changes
+}
+function subscribeRealtime(){
+  if(!sb || realtimeSubbed) return;
+  realtimeSubbed = true;
+  sb.channel('koha-tracker-view-changes')
+    .on('postgres_changes', { event:'*', schema:'public', table:'hui' }, scheduleReload)
+    .on('postgres_changes', { event:'*', schema:'public', table:'koha_entries' }, scheduleReload)
+    .on('postgres_changes', { event:'*', schema:'public', table:'hui_expenses' }, scheduleReload)
+    .subscribe();
+}
+window.addEventListener('online', loadAll);
+window.addEventListener('offline', ()=> setSyncState('offline'));
+
+/* ---------- CSV Export (read-only export, no writes) ---------- */
+function exportCSV(t){
+  const rows = [['#','Date','Whanau / Hapu','Type','Amount (NZD)','Food / Item Description','Note','Entered']];
+  const ordered = [...t.entries].sort((a,b)=>a.ts-b.ts);
+  ordered.forEach((e,i)=>{
+    rows.push([
+      i+1, e.date || '', e.name||'', e.type,
+      e.type==='food' ? '' : (Number(e.amount)||0).toFixed(2),
+      e.foodDesc||'', e.note||'', new Date(e.ts).toLocaleString('en-NZ')
+    ]);
+  });
+  const totals = huiTotals(t);
+  rows.push([]);
+  rows.push(['','','TOTAL CASH KOHA', totals.cash.toFixed(2)]);
+  rows.push(['','','TOTAL KOHA ENTRIES', totals.total]);
+  if((t.expenses||[]).length){
+    rows.push([]);
+    rows.push(['EXPENSES']);
+    rows.push(['#','Date','Description','Amount (NZD)']);
+    const orderedEx = [...t.expenses].sort((a,b)=>a.ts-b.ts);
+    orderedEx.forEach((ex,i)=>{
+      rows.push([i+1, ex.date||'', ex.description||'', (Number(ex.amount)||0).toFixed(2)]);
+    });
+  }
+  rows.push([]);
+  rows.push(['','','TOTAL EXPENSES', totals.expenses.toFixed(2)]);
+  rows.push(['','','NET (CASH KOHA - EXPENSES)', totals.net.toFixed(2)]);
+
+  const csv = rows.map(r => r.map(cell=>{
+    const s = String(cell ?? '');
+    return /[",\n]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s;
+  }).join(',')).join('\n');
+
+  const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const safeName = (t.name||'hui').replace(/[^a-z0-9]+/gi,'-').toLowerCase();
+  a.href = url;
+  a.download = `koha-${safeName}-${t.date}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+/* ---------- Render ---------- */
+function render(){
+  const app = document.getElementById('app');
+  const navBtn = document.getElementById('navBtn');
+  const headerTitle = document.getElementById('headerTitle');
+  const headerSubtitle = document.getElementById('headerSubtitle');
+
+  if(view==='home'){
+    navBtn.style.display = 'none';
+    headerTitle.textContent = 'Koha Tracker';
+    headerSubtitle.textContent = 'View only';
+    app.innerHTML = renderHome();
+  } else {
+    const t = getHui(currentHuiId);
+    if(!t){ goHome(); return; }
+    navBtn.style.display = 'inline-flex';
+    headerTitle.textContent = t.name;
+    headerSubtitle.textContent = `${fmtDate(t.date)}${t.location ? ' · '+escapeHtml(t.location) : ''} · View only`;
+    app.innerHTML = renderHuiView(t);
+  }
+}
+
+function renderHome(){
+  if(!sb){
+    return `<div class="card empty"><p class="muted">Not connected to the shared data — nothing to show here.</p></div>`;
+  }
+  if(state.hui.length===0){
+    return `<div class="card empty"><p style="font-size:2rem;margin:0;">🪶</p><h2 style="margin:10px 0 4px;">No records yet</h2><p class="muted">No koha records yet.</p></div>`;
+  }
+  const sorted = [...state.hui].sort((a,b)=> (b.date||'').localeCompare(a.date||''));
+  const items = sorted.map(t=>{
+    const tot = huiTotals(t);
+    return `
+      <div class="hui-item" onclick="openHui('${t.id}')">
+        <div class="info">
+          <strong>${escapeHtml(t.name)}</strong>
+          <span>${fmtDate(t.date)}${t.location ? ' · '+escapeHtml(t.location):''} · ${tot.total} koha · ${money(tot.cash)}${tot.expenses>0 ? ' · net '+money(tot.net) : ''}</span>
+        </div>
+        <span class="badge ${t.status==='closed'?'badge-closed':'badge-open'}">${t.status==='closed'?'Closed':'Open'}</span>
+      </div>`;
+  }).join('');
+  return `
+    <div class="card" style="padding:6px 14px;">
+      ${items}
+    </div>
+  `;
+}
+
+function renderHuiView(t){
+  const tot = huiTotals(t);
+  const entries = [...t.entries].sort((a,b)=>a.ts-b.ts); // chronological, as received
+  const listHtml = entries.length ? `<ol class="summary-list">${entries.map(e=>`
+      <li>
+        <span class="sname">${escapeHtml(e.name)}
+          <span class="sfood">${e.date ? fmtDate(e.date) : ''}${e.foodDesc ? (e.date ? ' — ' : '')+escapeHtml(e.foodDesc) : ''}${e.note ? ' · '+escapeHtml(e.note) : ''}</span>
+        </span>
+        <span class="samt">${e.type==='food' ? 'Food' : money(e.amount)}${e.type==='both' ? ' + food' : ''}</span>
+      </li>
+    `).join('')}</ol>` : `<p class="muted">No koha recorded.</p>`;
+
+  const expenses = [...(t.expenses||[])].sort((a,b)=>a.ts-b.ts);
+  const expensesListHtml = expenses.length ? `<ol class="summary-list">${expenses.map(ex=>`
+      <li>
+        <span class="sname">${escapeHtml(ex.description)}
+          <span class="sfood">${ex.date ? fmtDate(ex.date) : ''}</span>
+        </span>
+        <span class="samt">${money(ex.amount)}</span>
+      </li>
+    `).join('')}</ol>` : `<p class="muted">No expenses recorded.</p>`;
+
+  return `
+    <div class="card">
+      <div class="row" style="display:flex;justify-content:flex-end;margin-bottom:-6px;">
+        <span class="badge badge-view">View only</span>
+      </div>
+      <h2 style="text-align:center;">Koha Summary</h2>
+      <p class="muted" style="text-align:center;">For reading out to whānau</p>
+      <div class="totals-strip">
+        <div class="total-box">
+          <div class="amt">${money(tot.cash)}</div>
+          <div class="lbl">Total Cash</div>
+        </div>
+        <div class="total-box">
+          <div class="amt">${tot.total}</div>
+          <div class="lbl">Total Koha</div>
+        </div>
+      </div>
+      <div class="totals-strip">
+        <div class="total-box">
+          <div class="amt">${money(tot.expenses)}</div>
+          <div class="lbl">Total Expenses</div>
+        </div>
+        <div class="total-box">
+          <div class="amt">${money(tot.net)}</div>
+          <div class="lbl">Net Remaining</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Koha Received</h2>
+      ${listHtml}
+    </div>
+
+    <div class="card">
+      <h2>Expenses</h2>
+      ${expensesListHtml}
+    </div>
+
+    <div class="toolbar no-print">
+      <button class="btn btn-ghost btn-sm" onclick="goHome()">← All Hui</button>
+      <button class="btn btn-primary btn-sm" onclick="window.print()">🖨 Print</button>
+      <button class="btn btn-ghost btn-sm" onclick="exportCSV(getHui('${t.id}'))">⬇ CSV</button>
+    </div>
+  `;
+}
+
+/* No install prompt / service worker here — this page rides on the main
+   app's existing GitHub Pages deployment rather than being its own
+   installable app, so it just loads fresh over the network each time. */
+
+/* ================= Boot ================= */
+render();
+setSyncState(navigator.onLine ? (sb ? 'syncing' : 'error') : 'offline');
+loadAll();
+</script>
+</body>
+</html>

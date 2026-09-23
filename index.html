@@ -755,6 +755,38 @@ function exportCSV(t){
   URL.revokeObjectURL(url);
 }
 
+/* ---------- Share view-only link ---------- */
+function getViewOnlyUrl(){
+  return new URL('view.html', window.location.href).href;
+}
+async function copyViewLink(){
+  const url = getViewOnlyUrl();
+  try{
+    await navigator.clipboard.writeText(url);
+    alert('View-only link copied:\n\n' + url);
+  }catch(e){
+    prompt('Copy this view-only link:', url);
+  }
+}
+function emailViewLink(){
+  const url = getViewOnlyUrl();
+  const subject = encodeURIComponent('Koha Tracker — view-only link');
+  const body = encodeURIComponent(`Here's a live, view-only link to the Koha Tracker — nothing can be added, edited or deleted from it:\n\n${url}`);
+  window.location.href = `mailto:?subject=${subject}&body=${body}`;
+}
+function shareCardHtml(){
+  return `
+    <div class="card no-print">
+      <h2>Share View-Only Link</h2>
+      <p class="muted" style="margin-top:0;">A live, read-only link for a projector, second screen, or anyone who just needs to see totals — nothing can be edited from it.</p>
+      <div class="toolbar" style="margin-top:10px;">
+        <button class="btn btn-ghost btn-sm" onclick="copyViewLink()">🔗 Copy view-only link</button>
+        <button class="btn btn-ghost btn-sm" onclick="emailViewLink()">✉️ Email view-only link</button>
+      </div>
+    </div>
+  `;
+}
+
 /* ---------- Backup / Restore ---------- */
 function backupRestoreCardHtml(){
   return `
@@ -1063,6 +1095,7 @@ function renderHome(){
         <p class="muted">No koha records yet. Start your first hui record below.</p>
       </div>
       <button class="btn btn-primary btn-block" onclick="newHuiModal()">+ Start New Hui</button>
+      ${shareCardHtml()}
       ${backupRestoreCardHtml()}
     `;
   }
@@ -1084,6 +1117,7 @@ function renderHome(){
     <div class="card" style="padding:6px 14px;">
       ${items}
     </div>
+    ${shareCardHtml()}
     ${backupRestoreCardHtml()}
   `;
 }

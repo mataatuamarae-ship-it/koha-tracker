@@ -223,6 +223,11 @@ let state = { hui: [] };
 let currentHuiId = null;
 let view = 'home'; // home | hui
 
+// If the link has ?hui=<id>, this page is locked to just that one hui —
+// no list of other hui, no way to browse away from it.
+const lockedHuiId = new URLSearchParams(window.location.search).get('hui') || null;
+if(lockedHuiId){ currentHuiId = lockedHuiId; view = 'hui'; }
+
 function money(n){
   const v = Number(n)||0;
   return '$' + v.toLocaleString('en-NZ', {minimumFractionDigits:2, maximumFractionDigits:2});
@@ -248,7 +253,9 @@ function huiTotals(t){
 }
 
 /* ================= Sync status UI ================= */
+let currentSyncState = 'syncing';
 function setSyncState(s){
+  currentSyncState = s;
   const dot = document.getElementById('syncDot');
   const text = document.getElementById('syncText');
   if(!dot) return;
@@ -375,6 +382,23 @@ function render(){
   const headerTitle = document.getElementById('headerTitle');
   const headerSubtitle = document.getElementById('headerSubtitle');
 
+  if(lockedHuiId){
+    // Locked to a single hui via ?hui=<id> — never show the full list or a
+    // way to browse to another record.
+    navBtn.style.display = 'none';
+    const t = getHui(lockedHuiId);
+    if(!t){
+      headerTitle.textContent = 'Koha Tracker';
+      headerSubtitle.textContent = 'View only';
+      app.innerHTML = renderLockedMissing();
+      return;
+    }
+    headerTitle.textContent = t.name;
+    headerSubtitle.textContent = `${fmtDate(t.date)}${t.location ? ' · '+escapeHtml(t.location) : ''} · View only`;
+    app.innerHTML = renderHuiView(t, true);
+    return;
+  }
+
   if(view==='home'){
     navBtn.style.display = 'none';
     headerTitle.textContent = 'Koha Tracker';
@@ -386,8 +410,18 @@ function render(){
     navBtn.style.display = 'inline-flex';
     headerTitle.textContent = t.name;
     headerSubtitle.textContent = `${fmtDate(t.date)}${t.location ? ' · '+escapeHtml(t.location) : ''} · View only`;
-    app.innerHTML = renderHuiView(t);
+    app.innerHTML = renderHuiView(t, false);
   }
+}
+
+function renderLockedMissing(){
+  if(!sb){
+    return `<div class="card empty"><p class="muted">Not connected to the shared data — nothing to show here.</p></div>`;
+  }
+  if(currentSyncState==='syncing'){
+    return `<div class="card empty"><p class="muted">Loading…</p></div>`;
+  }
+  return `<div class="card empty"><p style="font-size:2rem;margin:0;">🪶</p><h2 style="margin:10px 0 4px;">Not found</h2><p class="muted">This hui record isn't available — it may have been deleted, or the link isn't correct.</p></div>`;
 }
 
 function renderHome(){
@@ -416,7 +450,7 @@ function renderHome(){
   `;
 }
 
-function renderHuiView(t){
+function renderHuiView(t, locked){
   const tot = huiTotals(t);
   const entries = [...t.entries].sort((a,b)=>a.ts-b.ts); // chronological, as received
   const listHtml = entries.length ? `<ol class="summary-list">${entries.map(e=>`
@@ -478,7 +512,7 @@ function renderHuiView(t){
     </div>
 
     <div class="toolbar no-print">
-      <button class="btn btn-ghost btn-sm" onclick="goHome()">← All Hui</button>
+      ${locked ? '' : `<button class="btn btn-ghost btn-sm" onclick="goHome()">← All Hui</button>`}
       <button class="btn btn-primary btn-sm" onclick="window.print()">🖨 Print</button>
       <button class="btn btn-ghost btn-sm" onclick="exportCSV(getHui('${t.id}'))">⬇ CSV</button>
     </div>

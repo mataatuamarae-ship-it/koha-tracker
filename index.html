@@ -756,11 +756,15 @@ function exportCSV(t){
 }
 
 /* ---------- Share view-only link ---------- */
-function getViewOnlyUrl(){
-  return new URL('view.html', window.location.href).href;
+// huiId omitted/falsy => link to the full view-only list.
+// huiId given => link locked to just that one hui's read-out.
+function getViewOnlyUrl(huiId){
+  const url = new URL('view.html', window.location.href);
+  if(huiId) url.searchParams.set('hui', huiId);
+  return url.href;
 }
-async function copyViewLink(){
-  const url = getViewOnlyUrl();
+async function copyViewLink(huiId){
+  const url = getViewOnlyUrl(huiId);
   try{
     await navigator.clipboard.writeText(url);
     alert('View-only link copied:\n\n' + url);
@@ -768,20 +772,28 @@ async function copyViewLink(){
     prompt('Copy this view-only link:', url);
   }
 }
-function emailViewLink(){
-  const url = getViewOnlyUrl();
-  const subject = encodeURIComponent('Koha Tracker — view-only link');
-  const body = encodeURIComponent(`Here's a live, view-only link to the Koha Tracker — nothing can be added, edited or deleted from it:\n\n${url}`);
+function emailViewLink(huiId, huiName){
+  const url = getViewOnlyUrl(huiId);
+  const subject = encodeURIComponent(huiId ? `Koha Tracker — ${huiName || 'hui'} (view-only)` : 'Koha Tracker — view-only link');
+  const body = encodeURIComponent(`Here's a live, view-only link${huiId ? ` to ${huiName || 'this hui'}` : ' to the Koha Tracker'} — nothing can be added, edited or deleted from it:\n\n${url}`);
   window.location.href = `mailto:?subject=${subject}&body=${body}`;
 }
 function shareCardHtml(){
+  const options = state.hui.length
+    ? `<label>Pick a hui to share</label>
+       <select id="shareHuiPick">
+         <option value="">All hui (full list)</option>
+         ${[...state.hui].sort((a,b)=> (b.date||'').localeCompare(a.date||'')).map(t=>`<option value="${t.id}">${escapeHtml(t.name)} — ${fmtDate(t.date)}</option>`).join('')}
+       </select>`
+    : '';
   return `
     <div class="card no-print">
       <h2>Share View-Only Link</h2>
-      <p class="muted" style="margin-top:0;">A live, read-only link for a projector, second screen, or anyone who just needs to see totals — nothing can be edited from it.</p>
+      <p class="muted" style="margin-top:0;">A live, read-only link for a projector, second screen, or anyone who just needs to see totals — nothing can be edited from it. Pick one hui to share just that read-out, or leave it on "All hui" to share the full list.</p>
+      ${options}
       <div class="toolbar" style="margin-top:10px;">
-        <button class="btn btn-ghost btn-sm" onclick="copyViewLink()">🔗 Copy view-only link</button>
-        <button class="btn btn-ghost btn-sm" onclick="emailViewLink()">✉️ Email view-only link</button>
+        <button class="btn btn-ghost btn-sm" onclick="copyViewLink(document.getElementById('shareHuiPick') ? document.getElementById('shareHuiPick').value : '')">🔗 Copy view-only link</button>
+        <button class="btn btn-ghost btn-sm" onclick="(function(){ const sel=document.getElementById('shareHuiPick'); const id = sel ? sel.value : ''; const name = sel && id ? sel.options[sel.selectedIndex].text : ''; emailViewLink(id, name); })()">✉️ Email view-only link</button>
       </div>
     </div>
   `;
@@ -1199,6 +1211,7 @@ function renderActive(t){
     <div class="toolbar no-print">
       <button class="btn btn-ghost btn-sm" onclick="openHui('${t.id}','summary')">📋 View Summary</button>
       <button class="btn btn-ghost btn-sm" onclick="exportCSV(getHui('${t.id}'))">⬇ CSV</button>
+      <button class="btn btn-ghost btn-sm" onclick="copyViewLink('${t.id}')">🔗 Share this hui</button>
       ${t.status==='open' ? `<button class="btn btn-danger btn-sm" onclick="closeHui('${t.id}')">Close hui</button>` : `<button class="btn btn-ghost btn-sm" onclick="reopenHui('${t.id}')">Reopen</button>`}
       <button class="btn btn-danger btn-sm" onclick="deleteHui('${t.id}')">Delete</button>
     </div>
@@ -1271,6 +1284,7 @@ function renderSummary(t){
       <button class="btn btn-ghost btn-sm" onclick="openHui('${t.id}','active')">← Back to entries</button>
       <button class="btn btn-primary btn-sm" onclick="window.print()">🖨 Print</button>
       <button class="btn btn-ghost btn-sm" onclick="exportCSV(getHui('${t.id}'))">⬇ CSV</button>
+      <button class="btn btn-ghost btn-sm" onclick="copyViewLink('${t.id}')">🔗 Share this hui</button>
     </div>
   `;
 }

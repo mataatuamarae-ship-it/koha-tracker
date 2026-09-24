@@ -3,56 +3,34 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
-<title>Koha Tracker</title>
-<meta name="description" content="Record and read out koha received at hui, shared live across everyone using it.">
-<link rel="manifest" href="manifest.json">
+<title>Koha Tracker (Offline)</title>
+<meta name="description" content="Record and read out koha received at hui. Fully offline, single device, no internet required.">
 <meta name="theme-color" content="#7a4a2b">
-<link rel="icon" href="icon-192.png">
 <link rel="stylesheet" href="shared.css">
-<link rel="apple-touch-icon" href="icon-192.png">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="Koha">
 </head>
 <body>
 
 <header>
   <div class="title">
     <h1 id="headerTitle">Koha Tracker</h1>
-    <div class="subtitle" id="headerSubtitle">Koha record &amp; read-out</div>
+    <div class="subtitle" id="headerSubtitle">Offline · this device only</div>
   </div>
   <div class="right no-print">
-    <div class="sync-pill" id="syncPill" title="Sync status">
-      <span class="sync-dot" id="syncDot"></span>
-      <span id="syncText">Online</span>
-    </div>
-    <button class="nav-btn" id="installBtn" onclick="installApp()" style="display:none;">⬇ Install</button>
     <button class="nav-btn" id="navBtn" onclick="goHome()" style="display:none;">← All Hui</button>
   </div>
 </header>
 
 <main id="app"></main>
 
-<footer class="hint no-print" id="footerHint">Shared live across everyone using this app · works offline and syncs when back online.</footer>
+<footer class="hint no-print" id="footerHint">Offline version — everything stays on this device only. Use Backup regularly and keep the file somewhere safe.</footer>
 
 <div id="modalRoot"></div>
 <input type="file" id="restoreFileInput" accept="application/json,.json" style="display:none" onchange="handleRestoreFile(event)" />
 
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <script src="shared.js"></script>
 <script>
-/* ================= Config ================= */
-const SUPABASE_URL = 'https://mmfaofgvueqfqygzxwfm.supabase.co';
-const SUPABASE_KEY = 'sb_publishable_BZyJdhPfnAcVFyTNUMM7XQ_5WyNS88c';
-
-const sb = (SUPABASE_URL && SUPABASE_KEY && window.supabase)
-  ? window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY)
-  : null;
-
 /* ================= Local storage ================= */
-const STORE_KEY = 'kohaTracker_v2';
-const QUEUE_KEY = 'kohaTracker_queue_v2';
+const STORE_KEY = 'kohaTrackerOffline_v1';
 
 function loadState(){
   try{
@@ -69,18 +47,7 @@ function loadState(){
 function saveState(){
   localStorage.setItem(STORE_KEY, JSON.stringify(state));
 }
-function loadQueue(){
-  try{
-    const raw = localStorage.getItem(QUEUE_KEY);
-    return raw ? JSON.parse(raw) : [];
-  }catch(e){ return []; }
-}
-function saveQueue(){
-  localStorage.setItem(QUEUE_KEY, JSON.stringify(queue));
-}
-
 let state = loadState();
-let queue = loadQueue();
 let currentHuiId = null;
 let view = 'home'; // home | active | summary
 
@@ -93,22 +60,10 @@ function uid(){
 }
 
 /* money(), fmtDate(), escapeHtml(), huiTotals() now live in shared.js —
-   loaded via <script src="shared.js"> below, shared with view.html and
-   koha-tracker-offline.html so a fix to one applies to all three. */
+   loaded via <script src="shared.js"> above, shared with index.html and
+   view.html so a fix to one applies to all three. */
 
 function getHui(id){ return state.hui.find(t=>t.id===id); }
-
-/* ================= Sync status UI ================= */
-let syncState = 'online'; // online | offline | syncing | error
-function setSyncState(s){
-  syncState = s;
-  const dot = document.getElementById('syncDot');
-  const text = document.getElementById('syncText');
-  if(!dot) return;
-  dot.className = 'sync-dot' + (s==='online' ? '' : ' '+s);
-  const labels = {online:'Synced', offline:'Offline', syncing:'Syncing…', error:'Sync issue'};
-  text.textContent = sb ? labels[s] : 'Local only';
-}
 
 /* ================= Navigation ================= */
 function goHome(){
@@ -120,197 +75,6 @@ function openHui(id, toView){
   view = toView || 'active';
   render();
 }
-
-/* ================= Sync queue ================= */
-function enqueue(op){
-  queue.push(op);
-  saveQueue();
-  flushQueue();
-}
-
-let flushing = false;
-const MAX_OP_RETRIES = 5;
-async function flushQueue(){
-  if(!sb) return;
-  if(flushing) return;
-  if(!navigator.onLine){ setSyncState('offline'); return; }
-  if(queue.length===0){ setSyncState('online'); return; }
-  flushing = true;
-  setSyncState('syncing');
-  let hadDropped = false;
-  while(queue.length){
-    const op = queue[0];
-    try{
-      await runOp(op);
-      queue.shift();
-      saveQueue();
-    }catch(err){
-      op._retries = (op._retries||0) + 1;
-      console.warn(`sync op failed (attempt ${op._retries})`, op, err && err.message ? err.message : err);
-      if(!navigator.onLine){
-        flushing = false;
-        setSyncState('offline');
-        return;
-      }
-      if(op._retries >= MAX_OP_RETRIES){
-        // This op keeps failing even though we're online — it's not a transient
-        // network blip, it's something structurally wrong (bad data, missing
-        // column, etc). Drop it so it can't jam every sync after it forever,
-        // but keep the local copy of the record intact.
-        console.error('Giving up on sync op after repeated failures, dropping it:', op, err);
-        queue.shift();
-        saveQueue();
-        hadDropped = true;
-        continue;
-      }
-      saveQueue();
-      flushing = false;
-      setSyncState('error');
-      return;
-    }
-  }
-  flushing = false;
-  setSyncState(hadDropped ? 'error' : 'online');
-}
-
-async function runOp(op){
-  if(op.type==='upsert_hui'){
-    const { error } = await sb.from('hui').upsert(op.payload);
-    if(error) throw error;
-  } else if(op.type==='delete_hui'){
-    const { error } = await sb.from('hui').delete().eq('id', op.id);
-    if(error) throw error;
-  } else if(op.type==='upsert_entry'){
-    const { error } = await sb.from('koha_entries').upsert(op.payload);
-    if(error) throw error;
-  } else if(op.type==='delete_entry'){
-    const { error } = await sb.from('koha_entries').delete().eq('id', op.id);
-    if(error) throw error;
-  } else if(op.type==='upsert_expense'){
-    const { error } = await sb.from('hui_expenses').upsert(op.payload);
-    if(error) throw error;
-  } else if(op.type==='delete_expense'){
-    const { error } = await sb.from('hui_expenses').delete().eq('id', op.id);
-    if(error) throw error;
-  }
-}
-
-function huiToRow(t){
-  return { id:t.id, name:t.name, date:t.date, location:t.location||null, status:t.status };
-}
-function entryToRow(huiId, e){
-  return {
-    id:e.id, hui_id:huiId, name:e.name, type:e.type,
-    amount: Number(e.amount)||0, food_desc: e.foodDesc||null, note: e.note||null,
-    date: e.date || null
-  };
-}
-function expenseToRow(huiId, ex){
-  return {
-    id:ex.id, hui_id:huiId, description: ex.description||'',
-    amount: Number(ex.amount)||0, date: ex.date || null
-  };
-}
-
-/* ================= Initial pull + realtime ================= */
-async function initialSync(){
-  if(!sb) return;
-  if(!navigator.onLine){ setSyncState('offline'); return; }
-  setSyncState('syncing');
-  try{
-    const [huiRes, entriesRes, expensesRes] = await Promise.all([
-      sb.from('hui').select('*').order('created_at', {ascending:true}),
-      sb.from('koha_entries').select('*').order('created_at', {ascending:true}),
-      sb.from('hui_expenses').select('*').order('created_at', {ascending:true})
-    ]);
-    if(huiRes.error) throw huiRes.error;
-    if(entriesRes.error) throw entriesRes.error;
-    if(expensesRes.error) throw expensesRes.error;
-
-    huiRes.data.forEach(row => mergeRemoteHui(row));
-    entriesRes.data.forEach(row => mergeRemoteEntry(row));
-    expensesRes.data.forEach(row => mergeRemoteExpense(row));
-
-    saveState();
-    render();
-    subscribeRealtime();
-    await flushQueue();
-    setSyncState('online');
-  }catch(err){
-    console.warn('initial sync failed', err);
-    setSyncState('error');
-  }
-}
-
-function mergeRemoteHui(row){
-  let t = getHui(row.id);
-  if(!t){
-    t = { id:row.id, name:row.name, date:row.date, location:row.location||'', status:row.status, entries:[], expenses:[] };
-    state.hui.push(t);
-  } else {
-    t.name = row.name; t.date = row.date; t.location = row.location||''; t.status = row.status;
-  }
-}
-function mergeRemoteEntry(row){
-  const t = getHui(row.hui_id);
-  if(!t) return; // hui not loaded (shouldn't happen once both fetched)
-  let e = t.entries.find(x=>x.id===row.id);
-  const ts = row.created_at ? new Date(row.created_at).getTime() : Date.now();
-  const date = row.date || (row.created_at ? row.created_at.slice(0,10) : '');
-  if(!e){
-    t.entries.push({ id:row.id, name:row.name, type:row.type, amount:row.amount, foodDesc:row.food_desc||'', note:row.note||'', date, ts });
-  } else {
-    e.name = row.name; e.type = row.type; e.amount = row.amount; e.foodDesc = row.food_desc||''; e.note = row.note||''; e.date = date; e.ts = ts;
-  }
-}
-function removeRemoteEntry(id){
-  state.hui.forEach(t=>{ t.entries = t.entries.filter(e=>e.id!==id); });
-}
-function mergeRemoteExpense(row){
-  const t = getHui(row.hui_id);
-  if(!t) return;
-  let ex = t.expenses.find(x=>x.id===row.id);
-  const ts = row.created_at ? new Date(row.created_at).getTime() : Date.now();
-  const date = row.date || (row.created_at ? row.created_at.slice(0,10) : '');
-  if(!ex){
-    t.expenses.push({ id:row.id, description:row.description||'', amount:row.amount, date, ts });
-  } else {
-    ex.description = row.description||''; ex.amount = row.amount; ex.date = date; ex.ts = ts;
-  }
-}
-function removeRemoteExpense(id){
-  state.hui.forEach(t=>{ t.expenses = t.expenses.filter(ex=>ex.id!==id); });
-}
-function removeRemoteHui(id){
-  state.hui = state.hui.filter(t=>t.id!==id);
-}
-
-let realtimeSubbed = false;
-function subscribeRealtime(){
-  if(!sb || realtimeSubbed) return;
-  realtimeSubbed = true;
-  sb.channel('koha-tracker-changes')
-    .on('postgres_changes', { event:'*', schema:'public', table:'hui' }, payload=>{
-      if(payload.eventType==='DELETE') removeRemoteHui(payload.old.id);
-      else mergeRemoteHui(payload.new);
-      saveState(); render();
-    })
-    .on('postgres_changes', { event:'*', schema:'public', table:'koha_entries' }, payload=>{
-      if(payload.eventType==='DELETE') removeRemoteEntry(payload.old.id);
-      else mergeRemoteEntry(payload.new);
-      saveState(); render();
-    })
-    .on('postgres_changes', { event:'*', schema:'public', table:'hui_expenses' }, payload=>{
-      if(payload.eventType==='DELETE') removeRemoteExpense(payload.old.id);
-      else mergeRemoteExpense(payload.new);
-      saveState(); render();
-    })
-    .subscribe();
-}
-
-window.addEventListener('online', ()=>{ flushQueue(); if(sb && !realtimeSubbed) initialSync(); });
-window.addEventListener('offline', ()=> setSyncState('offline'));
-setInterval(()=>{ if(sb && navigator.onLine) flushQueue(); }, 8000);
 
 /* ================= Actions ================= */
 function createHui(name, date, location){
@@ -325,7 +89,6 @@ function createHui(name, date, location){
   };
   state.hui.unshift(t);
   saveState();
-  enqueue({ type:'upsert_hui', payload: huiToRow(t) });
   openHui(t.id, 'active');
 }
 
@@ -333,7 +96,6 @@ function deleteHui(id){
   if(!confirm('Delete this koha record? This will permanently delete this hui record and all its koha entries for everyone.')) return;
   state.hui = state.hui.filter(t=>t.id!==id);
   saveState();
-  enqueue({ type:'delete_hui', id });
   goHome();
 }
 
@@ -342,7 +104,6 @@ function closeHui(id){
   if(!t) return;
   t.status = 'closed';
   saveState();
-  enqueue({ type:'upsert_hui', payload: huiToRow(t) });
   render();
 }
 function reopenHui(id){
@@ -350,7 +111,6 @@ function reopenHui(id){
   if(!t) return;
   t.status = 'open';
   saveState();
-  enqueue({ type:'upsert_hui', payload: huiToRow(t) });
   render();
 }
 
@@ -362,7 +122,6 @@ function addEntry(huiId, entry){
   entry.date = entry.date || new Date().toISOString().slice(0,10);
   t.entries.push(entry);
   saveState();
-  enqueue({ type:'upsert_entry', payload: entryToRow(huiId, entry) });
   render();
 }
 function updateEntry(huiId, entryId, fields){
@@ -372,17 +131,13 @@ function updateEntry(huiId, entryId, fields){
   if(!e) return;
   Object.assign(e, fields);
   saveState();
-  enqueue({ type:'upsert_entry', payload: entryToRow(huiId, e) });
   render();
 }
 function deleteEntry(huiId, entryId){
   const t = getHui(huiId);
   if(!t) return;
-  const e = t.entries.find(x=>x.id===entryId);
-  if(!confirm(`Remove this koha entry${e ? ' from '+e.name : ''}? This can't be undone.`)) return;
   t.entries = t.entries.filter(e=>e.id!==entryId);
   saveState();
-  enqueue({ type:'delete_entry', id: entryId });
   render();
 }
 
@@ -394,7 +149,6 @@ function addExpense(huiId, expense){
   expense.date = expense.date || new Date().toISOString().slice(0,10);
   t.expenses.push(expense);
   saveState();
-  enqueue({ type:'upsert_expense', payload: expenseToRow(huiId, expense) });
   render();
 }
 function updateExpense(huiId, expenseId, fields){
@@ -404,17 +158,13 @@ function updateExpense(huiId, expenseId, fields){
   if(!ex) return;
   Object.assign(ex, fields);
   saveState();
-  enqueue({ type:'upsert_expense', payload: expenseToRow(huiId, ex) });
   render();
 }
 function deleteExpense(huiId, expenseId){
   const t = getHui(huiId);
   if(!t) return;
-  const ex0 = t.expenses.find(x=>x.id===expenseId);
-  if(!confirm(`Remove this expense${ex0 ? ' ('+ex0.description+')' : ''}? This can't be undone.`)) return;
   t.expenses = t.expenses.filter(ex=>ex.id!==expenseId);
   saveState();
-  enqueue({ type:'delete_expense', id: expenseId });
   render();
 }
 
@@ -477,50 +227,6 @@ function exportCSV(t){
   URL.revokeObjectURL(url);
 }
 
-/* ---------- Share view-only link ---------- */
-// huiId omitted/falsy => link to the full view-only list.
-// huiId given => link locked to just that one hui's read-out.
-function getViewOnlyUrl(huiId){
-  const url = new URL('view.html', window.location.href);
-  if(huiId) url.searchParams.set('hui', huiId);
-  return url.href;
-}
-async function copyViewLink(huiId){
-  const url = getViewOnlyUrl(huiId);
-  try{
-    await navigator.clipboard.writeText(url);
-    alert('View-only link copied:\n\n' + url);
-  }catch(e){
-    prompt('Copy this view-only link:', url);
-  }
-}
-function emailViewLink(huiId, huiName){
-  const url = getViewOnlyUrl(huiId);
-  const subject = encodeURIComponent(huiId ? `Koha Tracker — ${huiName || 'hui'} (view-only)` : 'Koha Tracker — view-only link');
-  const body = encodeURIComponent(`Here's a live, view-only link${huiId ? ` to ${huiName || 'this hui'}` : ' to the Koha Tracker'} — nothing can be added, edited or deleted from it:\n\n${url}`);
-  window.location.href = `mailto:?subject=${subject}&body=${body}`;
-}
-function shareCardHtml(){
-  const options = state.hui.length
-    ? `<label>Pick a hui to share</label>
-       <select id="shareHuiPick">
-         <option value="">All hui (full list)</option>
-         ${[...state.hui].sort((a,b)=> (b.date||'').localeCompare(a.date||'')).map(t=>`<option value="${t.id}">${escapeHtml(t.name)} — ${fmtDate(t.date)}</option>`).join('')}
-       </select>`
-    : '';
-  return `
-    <div class="card no-print">
-      <h2>Share View-Only Link</h2>
-      <p class="muted" style="margin-top:0;">A live, read-only link for a projector, second screen, or anyone who just needs to see totals — nothing can be edited from it. Pick one hui to share just that read-out, or leave it on "All hui" to share the full list.</p>
-      ${options}
-      <div class="toolbar" style="margin-top:10px;">
-        <button class="btn btn-ghost btn-sm" onclick="copyViewLink(document.getElementById('shareHuiPick') ? document.getElementById('shareHuiPick').value : '')">🔗 Copy view-only link</button>
-        <button class="btn btn-ghost btn-sm" onclick="(function(){ const sel=document.getElementById('shareHuiPick'); const id = sel ? sel.value : ''; const name = sel && id ? sel.options[sel.selectedIndex].text : ''; emailViewLink(id, name); })()">✉️ Email view-only link</button>
-      </div>
-    </div>
-  `;
-}
-
 /* ---------- Backup / Restore ---------- */
 function backupRestoreCardHtml(){
   return `
@@ -542,7 +248,7 @@ function backupData(){
   const a = document.createElement('a');
   const stamp = new Date().toISOString().slice(0,10);
   a.href = url;
-  a.download = `koha-tracker-backup-${stamp}.json`;
+  a.download = `koha-tracker-offline-backup-${stamp}.json`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -572,7 +278,7 @@ function handleRestoreFile(event){
     const expenseCount = data.hui.reduce((sum,t)=> sum + (t.expenses||[]).length, 0);
     const ok = confirm(
       `Restore ${huiCount} hui, ${entryCount} koha entries and ${expenseCount} expenses from this backup?\n\n` +
-      `This only adds or updates records — nothing currently here will be deleted, and it re-syncs to everyone else.\n\n` +
+      `This only adds or updates records — nothing currently here will be deleted.\n\n` +
       `It is NOT a way to undo recent changes — it can only bring back older data, not remove anything added since.`
     );
     if(!ok){ event.target.value = ''; return; }
@@ -596,7 +302,6 @@ function restoreBackup(data){
       existing.location = t.location || '';
       existing.status = t.status || existing.status;
     }
-    enqueue({ type:'upsert_hui', payload: huiToRow(existing) });
 
     (t.entries||[]).forEach(e=>{
       if(!e || !e.id || !e.name) return;
@@ -611,7 +316,6 @@ function restoreBackup(data){
       } else {
         Object.assign(ex, fields);
       }
-      enqueue({ type:'upsert_entry', payload: entryToRow(existing.id, ex) });
     });
 
     (t.expenses||[]).forEach(x=>{
@@ -624,7 +328,6 @@ function restoreBackup(data){
       } else {
         Object.assign(exx, fields);
       }
-      enqueue({ type:'upsert_expense', payload: expenseToRow(existing.id, exx) });
     });
   });
   saveState();
@@ -807,7 +510,7 @@ function render(){
   if(view==='home'){
     navBtn.style.display = 'none';
     headerTitle.textContent = 'Koha Tracker';
-    headerSubtitle.textContent = 'Koha record & read-out';
+    headerSubtitle.textContent = 'Offline · this device only';
     app.innerHTML = renderHome();
   } else {
     const t = getHui(currentHuiId);
@@ -828,7 +531,6 @@ function renderHome(){
         <p class="muted">No koha records yet. Start your first hui record below.</p>
       </div>
       <button class="btn btn-primary btn-block" onclick="newHuiModal()">+ Start New Hui</button>
-      ${shareCardHtml()}
       ${backupRestoreCardHtml()}
     `;
   }
@@ -850,7 +552,6 @@ function renderHome(){
     <div class="card" style="padding:6px 14px;">
       ${items}
     </div>
-    ${shareCardHtml()}
     ${backupRestoreCardHtml()}
   `;
 }
@@ -931,28 +632,15 @@ function renderActive(t){
 
     <div class="toolbar no-print">
       <button class="btn btn-ghost btn-sm" onclick="openHui('${t.id}','summary')">📋 View Summary</button>
+      <button class="btn btn-ghost btn-sm" onclick="exportCSV(getHui('${t.id}'))">⬇ CSV</button>
       ${t.status==='open' ? `<button class="btn btn-danger btn-sm" onclick="closeHui('${t.id}')">Close hui</button>` : `<button class="btn btn-ghost btn-sm" onclick="reopenHui('${t.id}')">Reopen</button>`}
-      <button class="btn btn-ghost btn-sm" onclick="huiMoreMenu('${t.id}')">⋯ More</button>
+      <button class="btn btn-danger btn-sm" onclick="deleteHui('${t.id}')">Delete</button>
     </div>
 
     <div class="fab-row no-print">
       <button class="btn btn-primary btn-block" onclick="addEntryModal()">+ Add Koha</button>
     </div>
   `;
-}
-
-function huiMoreMenu(huiId){
-  const t = getHui(huiId);
-  if(!t) return;
-  showModal(`
-    <h3>More</h3>
-    <p class="muted">${escapeHtml(t.name)}</p>
-    <div class="toolbar" style="flex-direction:column;">
-      <button class="btn btn-ghost btn-block" onclick="closeModal(); exportCSV(getHui('${t.id}'))">⬇ CSV</button>
-      <button class="btn btn-ghost btn-block" onclick="closeModal(); copyViewLink('${t.id}')">🔗 Share this hui</button>
-      <button class="btn btn-danger btn-block" onclick="closeModal(); deleteHui('${t.id}')">🗑 Delete hui</button>
-    </div>
-  `);
 }
 
 function renderSummary(t){
@@ -1016,72 +704,13 @@ function renderSummary(t){
     <div class="toolbar no-print">
       <button class="btn btn-ghost btn-sm" onclick="openHui('${t.id}','active')">← Back to entries</button>
       <button class="btn btn-primary btn-sm" onclick="window.print()">🖨 Print</button>
-      <button class="btn btn-ghost btn-sm" onclick="huiMoreMenu('${t.id}')">⋯ More</button>
+      <button class="btn btn-ghost btn-sm" onclick="exportCSV(getHui('${t.id}'))">⬇ CSV</button>
     </div>
   `;
 }
 
-/* ================= Install as app ================= */
-let deferredInstallPrompt = null;
-window.addEventListener('beforeinstallprompt', (e)=>{
-  e.preventDefault();
-  deferredInstallPrompt = e;
-  const btn = document.getElementById('installBtn');
-  if(btn) btn.style.display = 'inline-flex';
-});
-function installApp(){
-  if(!deferredInstallPrompt) return;
-  deferredInstallPrompt.prompt();
-  deferredInstallPrompt.userChoice.finally(()=>{
-    deferredInstallPrompt = null;
-    const btn = document.getElementById('installBtn');
-    if(btn) btn.style.display = 'none';
-  });
-}
-window.addEventListener('appinstalled', ()=>{
-  const btn = document.getElementById('installBtn');
-  if(btn) btn.style.display = 'none';
-});
-
-function isStandalone(){
-  return window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
-}
-function isIOS(){
-  return /iphone|ipad|ipod/i.test(navigator.userAgent);
-}
-if(isIOS() && !isStandalone()){
-  const hint = document.getElementById('footerHint');
-  if(hint) hint.textContent = 'To install: tap the Share icon in Safari, then "Add to Home Screen".';
-}
-
-if('serviceWorker' in navigator){
-  window.addEventListener('load', ()=>{
-    navigator.serviceWorker.register('sw.js').then(reg => {
-      // Check for a newer sw.js/app whenever this tab/app is opened or
-      // brought back to the foreground, not just on a fresh page load.
-      document.addEventListener('visibilitychange', () => {
-        if(document.visibilityState === 'visible') reg.update().catch(()=>{});
-      });
-      window.addEventListener('focus', () => reg.update().catch(()=>{}));
-
-      // Once a newer service worker takes over, the page it's controlling
-      // is still running the OLD code in memory — reload once so the
-      // person actually sees the update, instead of it sitting there
-      // unused until their next manual refresh.
-      let reloadedForUpdate = false;
-      navigator.serviceWorker.addEventListener('controllerchange', () => {
-        if(reloadedForUpdate) return;
-        reloadedForUpdate = true;
-        window.location.reload();
-      });
-    }).catch(err=>console.warn('SW registration failed', err));
-  });
-}
-
 /* ================= Boot ================= */
 render();
-setSyncState(navigator.onLine ? 'online' : 'offline');
-if(sb){ initialSync(); }
 </script>
 </body>
 </html>

@@ -6,185 +6,9 @@
 <title>Koha Tracker — View Only</title>
 <meta name="description" content="View-only koha totals and read-out summaries — nothing here can be edited.">
 <meta name="theme-color" content="#7a4a2b">
+<link rel="stylesheet" href="shared.css">
 <style>
-  :root{
-    --bg:#faf7f2;
-    --panel:#ffffff;
-    --ink:#2b2420;
-    --ink-soft:#6b6259;
-    --line:#e6ddd0;
-    --brown:#7a4a2b;
-    --brown-dark:#5c3620;
-    --green:#3f6b4a;
-    --green-soft:#e8f0e9;
-    --gold:#b9862f;
-    --gold-soft:#faf1de;
-    --red:#a4433a;
-    --radius:14px;
-    --shadow:0 2px 10px rgba(60,40,20,0.08);
-  }
-  *{box-sizing:border-box;}
-  body{
-    margin:0;
-    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
-    background:var(--bg);
-    color:var(--ink);
-    -webkit-tap-highlight-color:transparent;
-  }
-  header{
-    background:linear-gradient(135deg,var(--brown) 0%,var(--brown-dark) 100%);
-    color:#fff;
-    padding:18px 20px;
-    display:flex;
-    align-items:center;
-    justify-content:space-between;
-    position:sticky;
-    top:0;
-    z-index:20;
-    box-shadow:var(--shadow);
-    gap:10px;
-  }
-  header .title{display:flex;flex-direction:column;min-width:0;}
-  header h1{margin:0;font-size:1.15rem;font-weight:700;letter-spacing:.2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-  header .subtitle{font-size:.78rem;opacity:.85;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-  header .right{display:flex;align-items:center;gap:8px;flex-shrink:0;}
-  header button.nav-btn{
-    background:rgba(255,255,255,0.15);
-    border:1px solid rgba(255,255,255,0.35);
-    color:#fff;
-    padding:8px 14px;
-    border-radius:10px;
-    font-size:.85rem;
-    cursor:pointer;
-    white-space:nowrap;
-  }
-  header button.nav-btn:active{background:rgba(255,255,255,0.3);}
-  .sync-pill{
-    display:flex;
-    align-items:center;
-    gap:6px;
-    background:rgba(255,255,255,0.12);
-    border:1px solid rgba(255,255,255,0.3);
-    padding:6px 10px;
-    border-radius:20px;
-    font-size:.72rem;
-    color:#fff;
-    white-space:nowrap;
-  }
-  .sync-dot{
-    width:8px;height:8px;border-radius:50%;
-    background:#8fd19e;
-    flex-shrink:0;
-  }
-  .sync-dot.offline{background:#e0a24a;}
-  .sync-dot.syncing{background:#f2d16b;animation:pulse 1s infinite;}
-  .sync-dot.error{background:#e26b5f;}
-  @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.35;}}
-  main{
-    max-width:760px;
-    margin:0 auto;
-    padding:16px 14px 60px;
-  }
-  .card{
-    background:var(--panel);
-    border-radius:var(--radius);
-    box-shadow:var(--shadow);
-    padding:18px;
-    margin-bottom:16px;
-    border:1px solid var(--line);
-  }
-  .card h2{margin:0 0 4px;font-size:1.05rem;}
-  .muted{color:var(--ink-soft);font-size:.85rem;}
-  .btn{
-    display:inline-flex;
-    align-items:center;
-    justify-content:center;
-    gap:6px;
-    border:none;
-    border-radius:12px;
-    padding:13px 18px;
-    font-size:.95rem;
-    font-weight:600;
-    cursor:pointer;
-    transition:transform .05s;
-  }
-  .btn:active{transform:scale(0.97);}
-  .btn-primary{background:var(--brown);color:#fff;}
-  .btn-ghost{background:transparent;color:var(--brown);border:1.5px solid var(--brown);}
-  .btn-sm{padding:8px 12px;font-size:.8rem;border-radius:9px;}
-  .badge{
-    font-size:.7rem;
-    font-weight:700;
-    padding:3px 9px;
-    border-radius:20px;
-    text-transform:uppercase;
-    letter-spacing:.3px;
-  }
-  .badge-open{background:var(--green-soft);color:var(--green);}
-  .badge-closed{background:#eee;color:#888;}
   .badge-view{background:var(--gold-soft);color:var(--brown-dark);}
-  .empty{
-    text-align:center;
-    padding:40px 20px;
-    color:var(--ink-soft);
-  }
-  .hui-item{
-    display:flex;
-    justify-content:space-between;
-    align-items:center;
-    padding:14px 4px;
-    border-bottom:1px solid var(--line);
-    cursor:pointer;
-  }
-  .hui-item:last-child{border-bottom:none;}
-  .hui-item:active{background:var(--gold-soft);}
-  .hui-item .info strong{display:block;font-size:1rem;}
-  .hui-item .info span{font-size:.8rem;color:var(--ink-soft);}
-  .totals-strip{
-    display:flex;
-    gap:10px;
-    margin:6px 0 4px;
-  }
-  .total-box{
-    flex:1;
-    background:var(--gold-soft);
-    border:1px solid #eddcb8;
-    border-radius:12px;
-    padding:12px 14px;
-    text-align:center;
-  }
-  .total-box .amt{font-size:1.35rem;font-weight:800;color:var(--brown-dark);}
-  .total-box .lbl{font-size:.72rem;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.4px;}
-  .summary-list{list-style:none;margin:0;padding:0;counter-reset:koha;}
-  .summary-list li{
-    counter-increment:koha;
-    padding:13px 4px;
-    border-bottom:1px solid var(--line);
-    display:flex;
-    justify-content:space-between;
-    align-items:baseline;
-    gap:8px;
-  }
-  .summary-list li::before{
-    content:counter(koha) ".";
-    color:var(--ink-soft);
-    font-weight:600;
-    margin-right:8px;
-    font-variant-numeric:tabular-nums;
-  }
-  .summary-list .sname{flex:1;font-weight:700;}
-  .summary-list .samt{font-weight:800;color:var(--brown-dark);white-space:nowrap;}
-  .summary-list .sfood{display:block;font-size:.8rem;font-weight:400;color:var(--ink-soft);margin-top:2px;}
-  .toolbar{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px;}
-  footer.hint{
-    text-align:center;color:var(--ink-soft);font-size:.75rem;padding:8px 20px 30px;
-  }
-  @media print{
-    header,.toolbar,.no-print{display:none !important;}
-    body{background:#fff;}
-    main{padding:0;max-width:100%;}
-    .card{box-shadow:none;border:none;padding:0;}
-  }
 </style>
 </head>
 <body>
@@ -210,6 +34,7 @@
 <footer class="hint no-print">View only — nothing on this page can be added, edited or deleted. For a hui summary read-out or a projector/second screen.</footer>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script src="shared.js"></script>
 <script>
 /* ================= Config (same project as the main app — read-only here) ================= */
 const SUPABASE_URL = 'https://mmfaofgvueqfqygzxwfm.supabase.co';
@@ -228,29 +53,10 @@ let view = 'home'; // home | hui
 const lockedHuiId = new URLSearchParams(window.location.search).get('hui') || null;
 if(lockedHuiId){ currentHuiId = lockedHuiId; view = 'hui'; }
 
-function money(n){
-  const v = Number(n)||0;
-  return '$' + v.toLocaleString('en-NZ', {minimumFractionDigits:2, maximumFractionDigits:2});
-}
-function fmtDate(d){
-  if(!d) return '';
-  const dt = new Date(d + 'T00:00:00');
-  if(isNaN(dt)) return d;
-  return dt.toLocaleDateString('en-NZ', {day:'numeric', month:'short', year:'numeric'});
-}
-function escapeHtml(s){
-  return String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-}
+/* money(), fmtDate(), escapeHtml(), huiTotals() now live in shared.js —
+   loaded via <script src="shared.js"> above, shared with index.html and
+   koha-tracker-offline.html so a fix to one applies to all three. */
 function getHui(id){ return state.hui.find(t=>t.id===id); }
-function huiTotals(t){
-  let cash = 0, foodCount = 0;
-  t.entries.forEach(e=>{
-    if(e.type==='cash' || e.type==='both') cash += Number(e.amount)||0;
-    if(e.type==='food' || e.type==='both') foodCount += 1;
-  });
-  const expenses = (t.expenses||[]).reduce((sum,ex)=> sum + (Number(ex.amount)||0), 0);
-  return {cash, foodCount, total: t.entries.length, expenses, net: cash - expenses};
-}
 
 /* ================= Sync status UI ================= */
 let currentSyncState = 'syncing';

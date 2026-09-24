@@ -1,10 +1,12 @@
-const CACHE_NAME = 'koha-tracker-v3';
+const CACHE_NAME = 'koha-tracker-v4';
 const APP_SHELL = [
   './',
   './index.html',
   './manifest.json',
   './icon-192.png',
   './icon-512.png',
+  './shared.css',
+  './shared.js',
   'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js'
 ];
 

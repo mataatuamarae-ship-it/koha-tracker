@@ -62,6 +62,7 @@ function loadState(){
     s.hui.forEach(t=>{
       if(!t.entries) t.entries = [];
       if(!t.expenses) t.expenses = [];
+      if(!t.activity) t.activity = [];
     });
     return s;
   }catch(e){ return {hui:[]}; }
@@ -97,6 +98,13 @@ function uid(){
    koha-tracker-offline.html so a fix to one applies to all three. */
 
 function getHui(id){ return state.hui.find(t=>t.id===id); }
+
+/* ================= Who's making changes ================= */
+// No login in this app, so we ask (optionally) who's on this device once,
+// and label each History entry with that name.
+const ACTOR_KEY = 'kohaTracker_actorName_v1';
+function getActorName(){ return localStorage.getItem(ACTOR_KEY) || null; }
+function setActorName(name){ localStorage.setItem(ACTOR_KEY, name); }
 
 /* ================= Sync status UI ================= */
 let syncState = 'online'; // online | offline | syncing | error
@@ -192,6 +200,9 @@ async function runOp(op){
   } else if(op.type==='delete_expense'){
     const { error } = await sb.from('hui_expenses').delete().eq('id', op.id);
     if(error) throw error;
+  } else if(op.type==='upsert_activity'){
+    const { error } = await sb.from('activity_log').upsert(op.payload);
+    if(error) throw error;
   }
 }
 
@@ -211,6 +222,13 @@ function expenseToRow(huiId, ex){
     amount: Number(ex.amount)||0, date: ex.date || null
   };
 }
+function activityToRow(huiId, a){
+  return {
+    id:a.id, hui_id:huiId, entity_type:a.entityType, entity_id:a.entityId,
+    action:a.action, actor_name:a.actorName||null, summary:a.summary,
+    before_data:a.beforeData||null, after_data:a.afterData||null
+  };
+}
 
 /* ================= Initial pull + realtime ================= */
 async function initialSync(){
@@ -218,18 +236,23 @@ async function initialSync(){
   if(!navigator.onLine){ setSyncState('offline'); return; }
   setSyncState('syncing');
   try{
-    const [huiRes, entriesRes, expensesRes] = await Promise.all([
+    const [huiRes, entriesRes, expensesRes, activityRes] = await Promise.all([
       sb.from('hui').select('*').order('created_at', {ascending:true}),
       sb.from('koha_entries').select('*').order('created_at', {ascending:true}),
-      sb.from('hui_expenses').select('*').order('created_at', {ascending:true})
+      sb.from('hui_expenses').select('*').order('created_at', {ascending:true}),
+      sb.from('activity_log').select('*').order('created_at', {ascending:true})
     ]);
     if(huiRes.error) throw huiRes.error;
     if(entriesRes.error) throw entriesRes.error;
     if(expensesRes.error) throw expensesRes.error;
+    // Older databases may not have activity_log yet (legacy migration not run) —
+    // don't let that block the rest of sync from working.
+    if(activityRes.error) console.warn('activity_log not available yet', activityRes.error);
 
     huiRes.data.forEach(row => mergeRemoteHui(row));
     entriesRes.data.forEach(row => mergeRemoteEntry(row));
     expensesRes.data.forEach(row => mergeRemoteExpense(row));
+    if(!activityRes.error) activityRes.data.forEach(row => mergeRemoteActivity(row));
 
     saveState();
     render();
@@ -245,7 +268,7 @@ async function initialSync(){
 function mergeRemoteHui(row){
   let t = getHui(row.id);
   if(!t){
-    t = { id:row.id, name:row.name, date:row.date, location:row.location||'', status:row.status, entries:[], expenses:[] };
+    t = { id:row.id, name:row.name, date:row.date, location:row.location||'', status:row.status, entries:[], expenses:[], activity:[] };
     state.hui.push(t);
   } else {
     t.name = row.name; t.date = row.date; t.location = row.location||''; t.status = row.status;
@@ -284,6 +307,18 @@ function removeRemoteExpense(id){
 function removeRemoteHui(id){
   state.hui = state.hui.filter(t=>t.id!==id);
 }
+function mergeRemoteActivity(row){
+  const t = getHui(row.hui_id);
+  if(!t) return;
+  if(!t.activity) t.activity = [];
+  if(t.activity.find(a=>a.id===row.id)) return; // activity log entries are immutable — nothing to update
+  const ts = row.created_at ? new Date(row.created_at).getTime() : Date.now();
+  t.activity.push({
+    id:row.id, entityType:row.entity_type, entityId:row.entity_id, action:row.action,
+    actorName:row.actor_name||null, summary:row.summary,
+    beforeData:row.before_data||null, afterData:row.after_data||null, ts
+  });
+}
 
 let realtimeSubbed = false;
 function subscribeRealtime(){
@@ -305,12 +340,54 @@ function subscribeRealtime(){
       else mergeRemoteExpense(payload.new);
       saveState(); render();
     })
+    .on('postgres_changes', { event:'*', schema:'public', table:'activity_log' }, payload=>{
+      if(payload.eventType!=='DELETE') mergeRemoteActivity(payload.new);
+      saveState(); render();
+    })
     .subscribe();
 }
 
 window.addEventListener('online', ()=>{ flushQueue(); if(sb && !realtimeSubbed) initialSync(); });
 window.addEventListener('offline', ()=> setSyncState('offline'));
 setInterval(()=>{ if(sb && navigator.onLine) flushQueue(); }, 8000);
+
+/* ================= Activity log ================= */
+function logActivity(huiId, entityType, entityId, action, summary, beforeData, afterData){
+  const t = getHui(huiId);
+  if(!t) return;
+  if(!t.activity) t.activity = [];
+  const a = {
+    id: uid(), entityType, entityId, action,
+    actorName: getActorName() || null, summary,
+    beforeData: beforeData || null, afterData: afterData || null,
+    ts: Date.now()
+  };
+  t.activity.push(a);
+  saveState();
+  enqueue({ type:'upsert_activity', payload: activityToRow(huiId, a) });
+}
+function describeEntryAdd(e){
+  const parts = [];
+  if(e.type==='cash' || e.type==='both') parts.push(money(e.amount));
+  if(e.type==='food' || e.type==='both') parts.push(e.foodDesc ? `food (${e.foodDesc})` : 'food');
+  return `Added ${parts.join(' + ')} from ${e.name}`;
+}
+function describeEntryChange(before, after){
+  const changes = [];
+  if(before.name !== after.name) changes.push(`name "${before.name}" → "${after.name}"`);
+  if((Number(before.amount)||0) !== (Number(after.amount)||0)) changes.push(`amount ${money(before.amount)} → ${money(after.amount)}`);
+  if((before.foodDesc||'') !== (after.foodDesc||'')) changes.push(`food "${before.foodDesc||'—'}" → "${after.foodDesc||'—'}"`);
+  if((before.note||'') !== (after.note||'')) changes.push(`note "${before.note||'—'}" → "${after.note||'—'}"`);
+  if((before.date||'') !== (after.date||'')) changes.push(`date ${fmtDate(before.date)} → ${fmtDate(after.date)}`);
+  return changes.length ? `Edited koha from ${after.name}: ${changes.join(', ')}` : `Edited koha from ${after.name}`;
+}
+function describeExpenseChange(before, after){
+  const changes = [];
+  if(before.description !== after.description) changes.push(`description "${before.description}" → "${after.description}"`);
+  if((Number(before.amount)||0) !== (Number(after.amount)||0)) changes.push(`amount ${money(before.amount)} → ${money(after.amount)}`);
+  if((before.date||'') !== (after.date||'')) changes.push(`date ${fmtDate(before.date)} → ${fmtDate(after.date)}`);
+  return changes.length ? `Edited expense "${after.description}": ${changes.join(', ')}` : `Edited expense "${after.description}"`;
+}
 
 /* ================= Actions ================= */
 function createHui(name, date, location){
@@ -321,11 +398,13 @@ function createHui(name, date, location){
     location: location || '',
     status: 'open',
     entries: [],
-    expenses: []
+    expenses: [],
+    activity: []
   };
   state.hui.unshift(t);
   saveState();
   enqueue({ type:'upsert_hui', payload: huiToRow(t) });
+  logActivity(t.id, 'hui', t.id, 'create', `Started hui "${t.name}"`, null, huiToRow(t));
   openHui(t.id, 'active');
 }
 
@@ -340,17 +419,21 @@ function deleteHui(id){
 function closeHui(id){
   const t = getHui(id);
   if(!t) return;
+  const before = huiToRow(t);
   t.status = 'closed';
   saveState();
   enqueue({ type:'upsert_hui', payload: huiToRow(t) });
+  logActivity(t.id, 'hui', t.id, 'update', 'Closed the hui', before, huiToRow(t));
   render();
 }
 function reopenHui(id){
   const t = getHui(id);
   if(!t) return;
+  const before = huiToRow(t);
   t.status = 'open';
   saveState();
   enqueue({ type:'upsert_hui', payload: huiToRow(t) });
+  logActivity(t.id, 'hui', t.id, 'update', 'Reopened the hui', before, huiToRow(t));
   render();
 }
 
@@ -363,6 +446,7 @@ function addEntry(huiId, entry){
   t.entries.push(entry);
   saveState();
   enqueue({ type:'upsert_entry', payload: entryToRow(huiId, entry) });
+  logActivity(huiId, 'koha_entry', entry.id, 'create', describeEntryAdd(entry), null, entryToRow(huiId, entry));
   render();
 }
 function updateEntry(huiId, entryId, fields){
@@ -370,9 +454,11 @@ function updateEntry(huiId, entryId, fields){
   if(!t) return;
   const e = t.entries.find(x=>x.id===entryId);
   if(!e) return;
+  const before = Object.assign({}, e);
   Object.assign(e, fields);
   saveState();
   enqueue({ type:'upsert_entry', payload: entryToRow(huiId, e) });
+  logActivity(huiId, 'koha_entry', entryId, 'update', describeEntryChange(before, e), entryToRow(huiId, before), entryToRow(huiId, e));
   render();
 }
 function deleteEntry(huiId, entryId){
@@ -383,6 +469,7 @@ function deleteEntry(huiId, entryId){
   t.entries = t.entries.filter(e=>e.id!==entryId);
   saveState();
   enqueue({ type:'delete_entry', id: entryId });
+  if(e) logActivity(huiId, 'koha_entry', entryId, 'delete', `Removed koha from ${e.name} (${e.type==='food' ? 'food' : money(e.amount)})`, entryToRow(huiId, e), null);
   render();
 }
 
@@ -395,6 +482,7 @@ function addExpense(huiId, expense){
   t.expenses.push(expense);
   saveState();
   enqueue({ type:'upsert_expense', payload: expenseToRow(huiId, expense) });
+  logActivity(huiId, 'expense', expense.id, 'create', `Added expense "${expense.description}" (${money(expense.amount)})`, null, expenseToRow(huiId, expense));
   render();
 }
 function updateExpense(huiId, expenseId, fields){
@@ -402,9 +490,11 @@ function updateExpense(huiId, expenseId, fields){
   if(!t) return;
   const ex = t.expenses.find(x=>x.id===expenseId);
   if(!ex) return;
+  const before = Object.assign({}, ex);
   Object.assign(ex, fields);
   saveState();
   enqueue({ type:'upsert_expense', payload: expenseToRow(huiId, ex) });
+  logActivity(huiId, 'expense', expenseId, 'update', describeExpenseChange(before, ex), expenseToRow(huiId, before), expenseToRow(huiId, ex));
   render();
 }
 function deleteExpense(huiId, expenseId){
@@ -415,6 +505,7 @@ function deleteExpense(huiId, expenseId){
   t.expenses = t.expenses.filter(ex=>ex.id!==expenseId);
   saveState();
   enqueue({ type:'delete_expense', id: expenseId });
+  if(ex0) logActivity(huiId, 'expense', expenseId, 'delete', `Removed expense "${ex0.description}" (${money(ex0.amount)})`, expenseToRow(huiId, ex0), null);
   render();
 }
 
@@ -588,7 +679,7 @@ function restoreBackup(data){
     if(!t || !t.id || !t.name) return;
     let existing = getHui(t.id);
     if(!existing){
-      existing = { id:t.id, name:t.name, date:t.date||new Date().toISOString().slice(0,10), location:t.location||'', status:t.status||'open', entries:[], expenses:[] };
+      existing = { id:t.id, name:t.name, date:t.date||new Date().toISOString().slice(0,10), location:t.location||'', status:t.status||'open', entries:[], expenses:[], activity:[] };
       state.hui.push(existing);
     } else {
       existing.name = t.name;
@@ -626,6 +717,10 @@ function restoreBackup(data){
       }
       enqueue({ type:'upsert_expense', payload: expenseToRow(existing.id, exx) });
     });
+
+    logActivity(existing.id, 'hui', existing.id, 'update',
+      `Restored/merged data from a backup file (${(t.entries||[]).length} koha, ${(t.expenses||[]).length} expenses in the file)`,
+      null, null);
   });
   saveState();
   render();
@@ -646,6 +741,27 @@ function showModal(html){
 }
 function closeModal(){
   document.getElementById('modalRoot').innerHTML = '';
+}
+
+function actorNameModal(isFirstTime){
+  const current = getActorName() || '';
+  showModal(`
+    <h3>${isFirstTime ? "Who's this?" : 'Change your name'}</h3>
+    <p class="muted">${isFirstTime ? "So changes you make can be labelled in each hui's History. Optional — you can skip this." : "Used to label changes you make in each hui's History."}</p>
+    <label>Your name</label>
+    <input type="text" id="actorNameInput" placeholder="e.g. Jim" value="${escapeHtml(current)}" />
+    <div class="toolbar">
+      <button class="btn btn-primary btn-block" onclick="submitActorName()">Save</button>
+      ${isFirstTime ? '<button class="btn btn-ghost btn-block" onclick="closeModal()">Skip for now</button>' : ''}
+    </div>
+  `);
+  setTimeout(()=>{ const el = document.getElementById('actorNameInput'); if(el) el.focus(); }, 50);
+}
+function submitActorName(){
+  const name = document.getElementById('actorNameInput').value.trim();
+  if(name) setActorName(name);
+  closeModal();
+  render();
 }
 
 function newHuiModal(){
@@ -828,6 +944,7 @@ function renderHome(){
         <p class="muted">No koha records yet. Start your first hui record below.</p>
       </div>
       <button class="btn btn-primary btn-block" onclick="newHuiModal()">+ Start New Hui</button>
+      ${actorNameLineHtml()}
       ${shareCardHtml()}
       ${backupRestoreCardHtml()}
     `;
@@ -850,9 +967,14 @@ function renderHome(){
     <div class="card" style="padding:6px 14px;">
       ${items}
     </div>
+    ${actorNameLineHtml()}
     ${shareCardHtml()}
     ${backupRestoreCardHtml()}
   `;
+}
+function actorNameLineHtml(){
+  const name = getActorName();
+  return `<p class="muted no-print" style="text-align:center;margin:-4px 0 16px;">Logging changes as <strong>${escapeHtml(name || 'Someone')}</strong> — <a href="#" onclick="actorNameModal(false);return false;">${name ? 'change' : 'set your name'}</a></p>`;
 }
 
 function renderActive(t){
@@ -950,8 +1072,35 @@ function huiMoreMenu(huiId){
     <div class="toolbar" style="flex-direction:column;">
       <button class="btn btn-ghost btn-block" onclick="closeModal(); exportCSV(getHui('${t.id}'))">⬇ CSV</button>
       <button class="btn btn-ghost btn-block" onclick="closeModal(); copyViewLink('${t.id}')">🔗 Share this hui</button>
+      <button class="btn btn-ghost btn-block" onclick="closeModal(); historyModal('${t.id}')">🕐 History</button>
       <button class="btn btn-danger btn-block" onclick="closeModal(); deleteHui('${t.id}')">🗑 Delete hui</button>
     </div>
+  `);
+}
+
+function activityIcon(action){
+  return action==='create' ? '➕' : action==='delete' ? '🗑' : '✏️';
+}
+function fmtDateTime(ts){
+  const d = new Date(ts);
+  return d.toLocaleDateString('en-NZ', {day:'numeric', month:'short'}) + ', ' + d.toLocaleTimeString('en-NZ', {hour:'numeric', minute:'2-digit'});
+}
+function historyModal(huiId){
+  const t = getHui(huiId);
+  if(!t) return;
+  const items = [...(t.activity||[])].sort((a,b)=>b.ts-a.ts);
+  const rows = items.length ? items.map(a=>`
+    <div class="entry">
+      <div>
+        <div class="who">${activityIcon(a.action)} ${escapeHtml(a.summary)}</div>
+        <div class="meta">${escapeHtml(a.actorName || 'Someone')} · ${fmtDateTime(a.ts)}</div>
+      </div>
+    </div>
+  `).join('') : `<p class="muted" style="padding:14px 4px;">No activity recorded yet.</p>`;
+  showModal(`
+    <h3>History</h3>
+    <p class="muted">${escapeHtml(t.name)} — every koha, expense and hui change, newest first.</p>
+    ${rows}
   `);
 }
 
@@ -1082,6 +1231,7 @@ if('serviceWorker' in navigator){
 render();
 setSyncState(navigator.onLine ? 'online' : 'offline');
 if(sb){ initialSync(); }
+if(!getActorName()){ setTimeout(()=>actorNameModal(true), 400); }
 </script>
 </body>
 </html>

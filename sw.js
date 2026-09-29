@@ -1,10 +1,11 @@
-const CACHE_NAME = 'koha-tracker-v5';
+const CACHE_NAME = 'koha-tracker-v6';
 const APP_SHELL = [
   './',
   './index.html',
   './manifest.json',
   './icon-192.png',
   './icon-512.png',
+  './marae-logo.png',
   './shared.css',
   './shared.js',
   'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js'

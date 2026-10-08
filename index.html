@@ -234,11 +234,28 @@ function activityToRow(huiId, a){
 }
 
 /* ================= Initial pull + realtime ================= */
+// Which local ids still have a not-yet-pushed change sitting in the queue —
+// used below so a reconciling pull never deletes something this device
+// created/changed offline but hasn't managed to sync up yet.
+function queuedIds(upsertType, deleteType){
+  const ids = new Set();
+  queue.forEach(op=>{
+    if(op.type===upsertType && op.payload && op.payload.id) ids.add(op.payload.id);
+    else if(op.type===deleteType && op.id) ids.add(op.id);
+  });
+  return ids;
+}
+
 async function initialSync(){
   if(!sb) return;
   if(!navigator.onLine){ setSyncState('offline'); return; }
   setSyncState('syncing');
   try{
+    // Push anything pending from this device first, so the pull just below
+    // reflects this device's own changes too (not just everyone else's) —
+    // this also keeps the reconciliation step after it safe.
+    await flushQueue();
+
     const [huiRes, entriesRes, expensesRes, activityRes] = await Promise.all([
       sb.from('hui').select('*').order('created_at', {ascending:true}),
       sb.from('koha_entries').select('*').order('created_at', {ascending:true}),
@@ -256,6 +273,35 @@ async function initialSync(){
     entriesRes.data.forEach(row => mergeRemoteEntry(row));
     expensesRes.data.forEach(row => mergeRemoteExpense(row));
     if(!activityRes.error) activityRes.data.forEach(row => mergeRemoteActivity(row));
+
+    // Reconcile deletions: this device may have missed a delete made
+    // elsewhere while it wasn't connected (realtime only catches deletes
+    // while this tab is open and subscribed). A full pull like this one is
+    // the authoritative list, so drop anything local that's no longer in
+    // it — except a record still waiting in this device's own queue to be
+    // pushed up, which hasn't reached the server yet so won't be in the
+    // pull. That protects anything created/changed offline from being
+    // wiped out by its own not-yet-synced state.
+    const remoteHuiIds = new Set(huiRes.data.map(r=>r.id));
+    const pendingHuiIds = queuedIds('upsert_hui', 'delete_hui');
+    state.hui = state.hui.filter(t => remoteHuiIds.has(t.id) || pendingHuiIds.has(t.id));
+
+    const remoteEntryIds = new Set(entriesRes.data.map(r=>r.id));
+    const pendingEntryIds = queuedIds('upsert_entry', 'delete_entry');
+    const remoteExpenseIds = new Set(expensesRes.data.map(r=>r.id));
+    const pendingExpenseIds = queuedIds('upsert_expense', 'delete_expense');
+    state.hui.forEach(t=>{
+      t.entries = t.entries.filter(e => remoteEntryIds.has(e.id) || pendingEntryIds.has(e.id));
+      t.expenses = t.expenses.filter(ex => remoteExpenseIds.has(ex.id) || pendingExpenseIds.has(ex.id));
+    });
+
+    if(!activityRes.error){
+      const remoteActivityIds = new Set(activityRes.data.map(r=>r.id));
+      const pendingActivityIds = queuedIds('upsert_activity', '__no_activity_delete__');
+      state.hui.forEach(t=>{
+        t.activity = (t.activity||[]).filter(a => remoteActivityIds.has(a.id) || pendingActivityIds.has(a.id));
+      });
+    }
 
     saveState();
     render();

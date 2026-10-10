@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Koha Tracker</title>
 <meta name="description" content="Record and read out koha received at hui, shared live across everyone using it.">
 <link rel="manifest" href="manifest.json">
@@ -42,7 +42,7 @@
 <div id="modalRoot"></div>
 <input type="file" id="restoreFileInput" accept="application/json,.json" style="display:none" onchange="handleRestoreFile(event)" />
 
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/dist/umd/supabase.js"></script>
 <script src="shared.js"></script>
 <script>
 /* ================= Config ================= */
@@ -139,49 +139,88 @@ function enqueue(op){
   flushQueue();
 }
 
-let flushing = false;
+/* Ops the server actually REJECTED (bad data, missing column, etc.) 5 times
+   are moved out of the queue so they can't jam everything behind them — but
+   they're kept here, not thrown away, and the reconciling pull in
+   initialSync() treats them as still-pending so the local copy of the
+   record is never deleted. */
+const FAILED_KEY = 'kohaTracker_failed_v1';
+function loadFailed(){
+  try{
+    const raw = localStorage.getItem(FAILED_KEY);
+    return raw ? JSON.parse(raw) : [];
+  }catch(e){ return []; }
+}
+function saveFailed(){
+  localStorage.setItem(FAILED_KEY, JSON.stringify(failedOps));
+}
+let failedOps = loadFailed();
+function idleSyncState(){ return failedOps.length ? 'error' : 'online'; }
+
+// A real server rejection comes back from Supabase with an error code
+// (e.g. '23503'). A connection failure — including "fake online" wifi with
+// no internet behind it — has no code. Only real rejections ever count
+// towards giving up on an op; connection failures are retried forever.
+function isServerRejection(err){
+  return !!(err && typeof err.code === 'string' && err.code.length > 0);
+}
+
+// Ids pushed up while initialSync() is mid-pull — the pull may have been
+// taken just before they landed, so the reconcile step must not treat them
+// as "deleted elsewhere". null when no pull is in progress.
+let pushedDuringPull = null;
+function notePushed(op){
+  if(!pushedDuringPull) return;
+  const id = op.payload ? op.payload.id : op.id;
+  if(id) pushedDuringPull.add(id);
+}
+
 const MAX_OP_RETRIES = 5;
-async function flushQueue(){
-  if(!sb) return;
-  if(flushing) return;
+// If a flush is already running, callers get that same in-progress flush
+// back (instead of returning straight away), so `await flushQueue()` really
+// does wait until this device's pending changes have been pushed.
+let flushPromise = null;
+function flushQueue(){
+  if(!sb) return Promise.resolve();
+  if(flushPromise) return flushPromise;
+  flushPromise = doFlush().finally(()=>{ flushPromise = null; });
+  return flushPromise;
+}
+async function doFlush(){
   if(!navigator.onLine){ setSyncState('offline'); return; }
-  if(queue.length===0){ setSyncState('online'); return; }
-  flushing = true;
+  if(queue.length===0){ setSyncState(idleSyncState()); return; }
   setSyncState('syncing');
-  let hadDropped = false;
   while(queue.length){
     const op = queue[0];
     try{
       await runOp(op);
       queue.shift();
       saveQueue();
+      notePushed(op);
     }catch(err){
-      op._retries = (op._retries||0) + 1;
-      console.warn(`sync op failed (attempt ${op._retries})`, op, err && err.message ? err.message : err);
-      if(!navigator.onLine){
-        flushing = false;
+      console.warn('sync op failed', op, err && err.message ? err.message : err);
+      if(!navigator.onLine || !isServerRejection(err)){
+        // Connection problem, not bad data — keep the op exactly where it
+        // is and don't count it towards giving up. Try again next round.
+        saveQueue();
         setSyncState('offline');
         return;
       }
+      op._retries = (op._retries||0) + 1;
       if(op._retries >= MAX_OP_RETRIES){
-        // This op keeps failing even though we're online — it's not a transient
-        // network blip, it's something structurally wrong (bad data, missing
-        // column, etc). Drop it so it can't jam every sync after it forever,
-        // but keep the local copy of the record intact.
-        console.error('Giving up on sync op after repeated failures, dropping it:', op, err);
+        console.error('Server keeps rejecting this sync op — moving it to the failed list:', op, err);
         queue.shift();
         saveQueue();
-        hadDropped = true;
+        failedOps.push(Object.assign({}, op, { _failedAt: Date.now(), _error: (err && err.message) || String(err) }));
+        saveFailed();
         continue;
       }
       saveQueue();
-      flushing = false;
       setSyncState('error');
       return;
     }
   }
-  flushing = false;
-  setSyncState(hadDropped ? 'error' : 'online');
+  setSyncState(idleSyncState());
 }
 
 async function runOp(op){
@@ -237,16 +276,29 @@ function activityToRow(huiId, a){
 // Which local ids still have a not-yet-pushed change sitting in the queue —
 // used below so a reconciling pull never deletes something this device
 // created/changed offline but hasn't managed to sync up yet.
+// Also covers ops on the failed list (never reached the server) and ids
+// pushed while the current pull was in flight (see pushedDuringPull).
 function queuedIds(upsertType, deleteType){
   const ids = new Set();
-  queue.forEach(op=>{
+  queue.concat(failedOps).forEach(op=>{
     if(op.type===upsertType && op.payload && op.payload.id) ids.add(op.payload.id);
     else if(op.type===deleteType && op.id) ids.add(op.id);
   });
+  if(pushedDuringPull) pushedDuringPull.forEach(id=>ids.add(id));
   return ids;
 }
 
-async function initialSync(){
+// Only ever one full sync at a time — a second caller gets the run that's
+// already in progress instead of starting an overlapping one.
+let syncPromise = null;
+let lastFullSync = 0;
+function initialSync(){
+  if(!sb) return Promise.resolve();
+  if(syncPromise) return syncPromise;
+  syncPromise = doInitialSync().finally(()=>{ syncPromise = null; lastFullSync = Date.now(); });
+  return syncPromise;
+}
+async function doInitialSync(){
   if(!sb) return;
   if(!navigator.onLine){ setSyncState('offline'); return; }
   setSyncState('syncing');
@@ -256,6 +308,7 @@ async function initialSync(){
     // this also keeps the reconciliation step after it safe.
     await flushQueue();
 
+    pushedDuringPull = new Set();
     const [huiRes, entriesRes, expensesRes, activityRes] = await Promise.all([
       sb.from('hui').select('*').order('created_at', {ascending:true}),
       sb.from('koha_entries').select('*').order('created_at', {ascending:true}),
@@ -303,12 +356,13 @@ async function initialSync(){
       });
     }
 
+    pushedDuringPull = null;
     saveState();
     render();
     subscribeRealtime();
-    await flushQueue();
-    setSyncState('online');
+    await flushQueue(); // sets the final pill state (Synced / Offline / Sync issue)
   }catch(err){
+    pushedDuringPull = null;
     console.warn('initial sync failed', err);
     setSyncState('error');
   }
@@ -328,7 +382,7 @@ function mergeRemoteEntry(row){
   if(!t) return; // hui not loaded (shouldn't happen once both fetched)
   let e = t.entries.find(x=>x.id===row.id);
   const ts = row.created_at ? new Date(row.created_at).getTime() : Date.now();
-  const date = row.date || (row.created_at ? row.created_at.slice(0,10) : '');
+  const date = row.date || (row.created_at ? localDateOf(row.created_at) : '');
   if(!e){
     t.entries.push({ id:row.id, name:row.name, type:row.type, amount:row.amount, foodDesc:row.food_desc||'', note:row.note||'', date, ts });
   } else {
@@ -343,7 +397,7 @@ function mergeRemoteExpense(row){
   if(!t) return;
   let ex = t.expenses.find(x=>x.id===row.id);
   const ts = row.created_at ? new Date(row.created_at).getTime() : Date.now();
-  const date = row.date || (row.created_at ? row.created_at.slice(0,10) : '');
+  const date = row.date || (row.created_at ? localDateOf(row.created_at) : '');
   if(!ex){
     t.expenses.push({ id:row.id, description:row.description||'', amount:row.amount, date, ts });
   } else {
@@ -393,10 +447,29 @@ function subscribeRealtime(){
       if(payload.eventType!=='DELETE') mergeRemoteActivity(payload.new);
       saveState(); render();
     })
-    .subscribe();
+    .subscribe(status=>{
+      // supabase-js reconnects the channel by itself after a drop, but any
+      // changes made while it was down are never replayed — so once it's
+      // back, do a full sync to catch up. (Skipped on the very first
+      // connect, since initialSync() has only just run.)
+      if(status==='SUBSCRIBED'){
+        if(realtimeDropped){ realtimeDropped = false; initialSync(); }
+      } else if(status==='CHANNEL_ERROR' || status==='TIMED_OUT' || status==='CLOSED'){
+        realtimeDropped = true;
+      }
+    });
 }
+let realtimeDropped = false;
 
-window.addEventListener('online', ()=>{ flushQueue(); if(sb && !realtimeSubbed) initialSync(); });
+// Catch up on anything missed while this device was offline, asleep or in
+// the background — live updates only cover changes made while connected.
+window.addEventListener('online', ()=>{ initialSync(); });
+const RESYNC_MIN_GAP_MS = 30000; // don't re-download on every quick app switch
+document.addEventListener('visibilitychange', ()=>{
+  if(document.visibilityState==='visible' && sb && navigator.onLine && Date.now()-lastFullSync > RESYNC_MIN_GAP_MS){
+    initialSync();
+  }
+});
 window.addEventListener('offline', ()=> setSyncState('offline'));
 setInterval(()=>{ if(sb && navigator.onLine) flushQueue(); }, 8000);
 
@@ -443,7 +516,7 @@ function createHui(name, date, location){
   const t = {
     id: uid(),
     name: name || 'Hui',
-    date: date || new Date().toISOString().slice(0,10),
+    date: date || todayLocal(),
     location: location || '',
     status: 'open',
     entries: [],
@@ -491,7 +564,7 @@ function addEntry(huiId, entry){
   if(!t) return;
   entry.id = uid();
   entry.ts = Date.now();
-  entry.date = entry.date || new Date().toISOString().slice(0,10);
+  entry.date = entry.date || todayLocal();
   t.entries.push(entry);
   saveState();
   enqueue({ type:'upsert_entry', payload: entryToRow(huiId, entry) });
@@ -527,7 +600,7 @@ function addExpense(huiId, expense){
   if(!t) return;
   expense.id = uid();
   expense.ts = Date.now();
-  expense.date = expense.date || new Date().toISOString().slice(0,10);
+  expense.date = expense.date || todayLocal();
   t.expenses.push(expense);
   saveState();
   enqueue({ type:'upsert_expense', payload: expenseToRow(huiId, expense) });
@@ -567,55 +640,7 @@ function knownNames(){
 }
 
 /* ---------- CSV Export ---------- */
-function exportCSV(t){
-  const rows = [['#','Date','Whanau / Hapu','Type','Amount (NZD)','Food / Item Description','Note','Entered']];
-  const ordered = [...t.entries].sort((a,b)=>a.ts-b.ts);
-  ordered.forEach((e,i)=>{
-    rows.push([
-      i+1,
-      e.date || '',
-      e.name||'',
-      e.type,
-      e.type==='food' ? '' : (Number(e.amount)||0).toFixed(2),
-      e.foodDesc||'',
-      e.note||'',
-      new Date(e.ts).toLocaleString('en-NZ')
-    ]);
-  });
-  const totals = huiTotals(t);
-  rows.push([]);
-  rows.push(['','','TOTAL CASH KOHA', totals.cash.toFixed(2)]);
-  rows.push(['','','TOTAL KOHA ENTRIES', totals.total]);
-
-  if((t.expenses||[]).length){
-    rows.push([]);
-    rows.push(['EXPENSES']);
-    rows.push(['#','Date','Description','Amount (NZD)']);
-    const orderedEx = [...t.expenses].sort((a,b)=>a.ts-b.ts);
-    orderedEx.forEach((ex,i)=>{
-      rows.push([i+1, ex.date||'', ex.description||'', (Number(ex.amount)||0).toFixed(2)]);
-    });
-  }
-  rows.push([]);
-  rows.push(['','','TOTAL EXPENSES', totals.expenses.toFixed(2)]);
-  rows.push(['','','NET (CASH KOHA - EXPENSES)', totals.net.toFixed(2)]);
-
-  const csv = rows.map(r => r.map(cell=>{
-    const s = String(cell ?? '');
-    return /[",\n]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s;
-  }).join(',')).join('\n');
-
-  const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  const safeName = (t.name||'hui').replace(/[^a-z0-9]+/gi,'-').toLowerCase();
-  a.href = url;
-  a.download = `koha-${safeName}-${t.date}.csv`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-}
+/* exportCSV() now lives in shared.js — shared with the other two apps. */
 
 /* ---------- Share view-only link ---------- */
 // huiId omitted/falsy => link to the full view-only list.
@@ -680,7 +705,7 @@ function backupData(){
   const blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'});
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
-  const stamp = new Date().toISOString().slice(0,10);
+  const stamp = todayLocal();
   a.href = url;
   a.download = `koha-tracker-backup-${stamp}.json`;
   document.body.appendChild(a);
@@ -728,7 +753,7 @@ function restoreBackup(data){
     if(!t || !t.id || !t.name) return;
     let existing = getHui(t.id);
     if(!existing){
-      existing = { id:t.id, name:t.name, date:t.date||new Date().toISOString().slice(0,10), location:t.location||'', status:t.status||'open', entries:[], expenses:[], activity:[] };
+      existing = { id:t.id, name:t.name, date:t.date||todayLocal(), location:t.location||'', status:t.status||'open', entries:[], expenses:[], activity:[] };
       state.hui.push(existing);
     } else {
       existing.name = t.name;
@@ -814,7 +839,7 @@ function submitActorName(){
 }
 
 function newHuiModal(){
-  const today = new Date().toISOString().slice(0,10);
+  const today = todayLocal();
   showModal(`
     <h3>Start New Hui</h3>
     <p class="muted">Start a new koha record</p>
@@ -840,7 +865,7 @@ function submitNewHui(){
 }
 
 function addEntryModal(){
-  const defaultDate = new Date().toISOString().slice(0,10);
+  const defaultDate = todayLocal();
   entryModal({ date: defaultDate, type:'cash' }, null);
 }
 
@@ -893,6 +918,7 @@ function submitEntry(){
   const hasFood = !!foodDesc;
 
   if(!name){ alert('Please enter who the koha is from.'); return; }
+  if(amount && Number(amount) < 0){ alert("Amount can't be negative."); return; }
   if(!hasCash && !hasFood){ alert('Please enter a cash amount, a food description, or both.'); return; }
 
   closeModal();
@@ -914,7 +940,7 @@ function submitEntry(){
 }
 
 function addExpenseModal(){
-  const defaultDate = new Date().toISOString().slice(0,10);
+  const defaultDate = todayLocal();
   expenseModal({ date: defaultDate }, null);
 }
 function editExpenseModal(huiId, expenseId){
@@ -948,6 +974,7 @@ function submitExpense(){
   const amount = document.getElementById('xAmount').value;
   const date = document.getElementById('xDate').value;
   if(!description){ alert('Please enter what the expense was for.'); return; }
+  if(amount && Number(amount) < 0){ alert("Amount can't be negative."); return; }
   if(!amount || Number(amount)<=0){
     if(!confirm('No amount entered — save anyway with $0.00?')) return;
   }
@@ -979,7 +1006,7 @@ function render(){
     if(!t){ goHome(); return; }
     navBtn.style.display = 'inline-flex';
     headerTitle.textContent = t.name;
-    headerSubtitle.textContent = `${fmtDate(t.date)}${t.location ? ' · '+escapeHtml(t.location) : ''}`;
+    headerSubtitle.textContent = `${fmtDate(t.date)}${t.location ? ' · '+t.location : ''}`;
     app.innerHTML = (view==='summary') ? renderSummary(t) : renderActive(t);
   }
 }

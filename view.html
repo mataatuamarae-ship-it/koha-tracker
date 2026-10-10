@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Koha Tracker — View Only</title>
 <meta name="description" content="View-only koha totals and read-out summaries — nothing here can be edited.">
 <meta name="theme-color" content="#7a4a2b">
@@ -36,7 +36,7 @@
 
 <footer class="hint no-print">View only — nothing on this page can be added, edited or deleted. For a hui summary read-out or a projector/second screen.</footer>
 
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/dist/umd/supabase.js"></script>
 <script src="shared.js"></script>
 <script>
 /* ================= Config (same project as the main app — read-only here) ================= */
@@ -78,7 +78,9 @@ function goHome(){ view='home'; currentHuiId=null; render(); }
 function openHui(id){ currentHuiId = id; view = 'hui'; render(); }
 
 /* ================= Read-only data load ================= */
+let lastLoad = 0;
 async function loadAll(){
+  lastLoad = Date.now();
   if(!sb){ setSyncState('error'); render(); return; }
   setSyncState('syncing');
   try{
@@ -99,14 +101,14 @@ async function loadAll(){
       const t = byId[row.hui_id];
       if(!t) return;
       const ts = row.created_at ? new Date(row.created_at).getTime() : Date.now();
-      const date = row.date || (row.created_at ? row.created_at.slice(0,10) : '');
+      const date = row.date || (row.created_at ? localDateOf(row.created_at) : '');
       t.entries.push({ id:row.id, name:row.name, type:row.type, amount:row.amount, foodDesc:row.food_desc||'', note:row.note||'', date, ts });
     });
     expensesRes.data.forEach(row=>{
       const t = byId[row.hui_id];
       if(!t) return;
       const ts = row.created_at ? new Date(row.created_at).getTime() : Date.now();
-      const date = row.date || (row.created_at ? row.created_at.slice(0,10) : '');
+      const date = row.date || (row.created_at ? localDateOf(row.created_at) : '');
       t.expenses.push({ id:row.id, description:row.description||'', amount:row.amount, date, ts });
     });
 
@@ -134,55 +136,26 @@ function subscribeRealtime(){
     .on('postgres_changes', { event:'*', schema:'public', table:'hui' }, scheduleReload)
     .on('postgres_changes', { event:'*', schema:'public', table:'koha_entries' }, scheduleReload)
     .on('postgres_changes', { event:'*', schema:'public', table:'hui_expenses' }, scheduleReload)
-    .subscribe();
+    .subscribe(status=>{
+      // The channel reconnects by itself after a drop, but changes made
+      // while it was down are never replayed — reload once it's back.
+      if(status==='SUBSCRIBED'){
+        if(realtimeDropped){ realtimeDropped = false; loadAll(); }
+      } else if(status==='CHANNEL_ERROR' || status==='TIMED_OUT' || status==='CLOSED'){
+        realtimeDropped = true;
+      }
+    });
 }
+let realtimeDropped = false;
 window.addEventListener('online', loadAll);
+// Catch up when the screen/tab comes back after sleeping or being hidden.
+document.addEventListener('visibilitychange', ()=>{
+  if(document.visibilityState==='visible' && Date.now()-lastLoad > 30000) loadAll();
+});
 window.addEventListener('offline', ()=> setSyncState('offline'));
 
 /* ---------- CSV Export (read-only export, no writes) ---------- */
-function exportCSV(t){
-  const rows = [['#','Date','Whanau / Hapu','Type','Amount (NZD)','Food / Item Description','Note','Entered']];
-  const ordered = [...t.entries].sort((a,b)=>a.ts-b.ts);
-  ordered.forEach((e,i)=>{
-    rows.push([
-      i+1, e.date || '', e.name||'', e.type,
-      e.type==='food' ? '' : (Number(e.amount)||0).toFixed(2),
-      e.foodDesc||'', e.note||'', new Date(e.ts).toLocaleString('en-NZ')
-    ]);
-  });
-  const totals = huiTotals(t);
-  rows.push([]);
-  rows.push(['','','TOTAL CASH KOHA', totals.cash.toFixed(2)]);
-  rows.push(['','','TOTAL KOHA ENTRIES', totals.total]);
-  if((t.expenses||[]).length){
-    rows.push([]);
-    rows.push(['EXPENSES']);
-    rows.push(['#','Date','Description','Amount (NZD)']);
-    const orderedEx = [...t.expenses].sort((a,b)=>a.ts-b.ts);
-    orderedEx.forEach((ex,i)=>{
-      rows.push([i+1, ex.date||'', ex.description||'', (Number(ex.amount)||0).toFixed(2)]);
-    });
-  }
-  rows.push([]);
-  rows.push(['','','TOTAL EXPENSES', totals.expenses.toFixed(2)]);
-  rows.push(['','','NET (CASH KOHA - EXPENSES)', totals.net.toFixed(2)]);
-
-  const csv = rows.map(r => r.map(cell=>{
-    const s = String(cell ?? '');
-    return /[",\n]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s;
-  }).join(',')).join('\n');
-
-  const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  const safeName = (t.name||'hui').replace(/[^a-z0-9]+/gi,'-').toLowerCase();
-  a.href = url;
-  a.download = `koha-${safeName}-${t.date}.csv`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-}
+/* exportCSV() now lives in shared.js — shared with the other two apps. */
 
 /* ---------- Render ---------- */
 function render(){
@@ -203,7 +176,7 @@ function render(){
       return;
     }
     headerTitle.textContent = t.name;
-    headerSubtitle.textContent = `${fmtDate(t.date)}${t.location ? ' · '+escapeHtml(t.location) : ''} · View only`;
+    headerSubtitle.textContent = `${fmtDate(t.date)}${t.location ? ' · '+t.location : ''} · View only`;
     app.innerHTML = renderHuiView(t, true);
     return;
   }
@@ -218,7 +191,7 @@ function render(){
     if(!t){ goHome(); return; }
     navBtn.style.display = 'inline-flex';
     headerTitle.textContent = t.name;
-    headerSubtitle.textContent = `${fmtDate(t.date)}${t.location ? ' · '+escapeHtml(t.location) : ''} · View only`;
+    headerSubtitle.textContent = `${fmtDate(t.date)}${t.location ? ' · '+t.location : ''} · View only`;
     app.innerHTML = renderHuiView(t, false);
   }
 }

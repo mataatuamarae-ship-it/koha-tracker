@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Koha Tracker (Offline)</title>
 <meta name="description" content="Record and read out koha received at hui. Fully offline, single device, no internet required.">
 <meta name="theme-color" content="#7a4a2b">
@@ -49,6 +49,37 @@ function loadState(){
 }
 function saveState(){
   localStorage.setItem(STORE_KEY, JSON.stringify(state));
+  try{ localStorage.setItem(LAST_CHANGE_KEY, String(Date.now())); }catch(e){}
+}
+
+/* ---------- Backup reminder ---------- */
+// This app's ONLY copy of the data is in this browser, which can clear it
+// (Safari after ~7 days unvisited unless on the Home Screen; Android when
+// low on space). So we track when data last changed vs. last backed up,
+// and show a reminder on the home screen when there are un-backed-up changes.
+const LAST_CHANGE_KEY = 'kohaTrackerOffline_lastChange_v1';
+const LAST_BACKUP_KEY = 'kohaTrackerOffline_lastBackup_v1';
+function readTime(key){
+  try{ return Number(localStorage.getItem(key)) || 0; }catch(e){ return 0; }
+}
+function backupReminderHtml(){
+  const lastChange = readTime(LAST_CHANGE_KEY);
+  const lastBackup = readTime(LAST_BACKUP_KEY);
+  // Existing data from before this reminder existed has no change time —
+  // treat it as un-backed-up if there's never been a backup.
+  if(lastBackup && lastChange <= lastBackup) return '';
+  const since = lastBackup ? fmtDate(localDateOf(lastBackup)) : 'never';
+  const ios = /iphone|ipad|ipod/i.test(navigator.userAgent);
+  const standalone = window.navigator.standalone === true || window.matchMedia('(display-mode: standalone)').matches;
+  return `
+    <div class="card no-print" style="background:var(--gold-soft);">
+      <h2>Not backed up since ${since}</h2>
+      <p class="muted" style="margin-top:0;">This app keeps everything on this device only. If the browser clears its data, these records are gone — keep a backup file somewhere safe.</p>
+      ${ios && !standalone ? '<p class="muted" style="margin-top:0;">Add this page to your Home Screen (Share icon → "Add to Home Screen") so Safari doesn\'t clear it.</p>' : ''}
+      <div class="toolbar" style="margin-top:10px;">
+        <button class="btn btn-primary btn-sm" onclick="backupData()">⬇ Backup now</button>
+      </div>
+    </div>`;
 }
 let state = loadState();
 let currentHuiId = null;
@@ -84,7 +115,7 @@ function createHui(name, date, location){
   const t = {
     id: uid(),
     name: name || 'Hui',
-    date: date || new Date().toISOString().slice(0,10),
+    date: date || todayLocal(),
     location: location || '',
     status: 'open',
     entries: [],
@@ -96,7 +127,7 @@ function createHui(name, date, location){
 }
 
 function deleteHui(id){
-  if(!confirm('Delete this koha record? This will permanently delete this hui record and all its koha entries for everyone.')) return;
+  if(!confirm("Delete this koha record? This will permanently delete this hui and all its koha entries and expenses from this device. It can't be undone unless you have a backup file.")) return;
   state.hui = state.hui.filter(t=>t.id!==id);
   saveState();
   goHome();
@@ -122,7 +153,7 @@ function addEntry(huiId, entry){
   if(!t) return;
   entry.id = uid();
   entry.ts = Date.now();
-  entry.date = entry.date || new Date().toISOString().slice(0,10);
+  entry.date = entry.date || todayLocal();
   t.entries.push(entry);
   saveState();
   render();
@@ -149,7 +180,7 @@ function addExpense(huiId, expense){
   if(!t) return;
   expense.id = uid();
   expense.ts = Date.now();
-  expense.date = expense.date || new Date().toISOString().slice(0,10);
+  expense.date = expense.date || todayLocal();
   t.expenses.push(expense);
   saveState();
   render();
@@ -180,55 +211,7 @@ function knownNames(){
 }
 
 /* ---------- CSV Export ---------- */
-function exportCSV(t){
-  const rows = [['#','Date','Whanau / Hapu','Type','Amount (NZD)','Food / Item Description','Note','Entered']];
-  const ordered = [...t.entries].sort((a,b)=>a.ts-b.ts);
-  ordered.forEach((e,i)=>{
-    rows.push([
-      i+1,
-      e.date || '',
-      e.name||'',
-      e.type,
-      e.type==='food' ? '' : (Number(e.amount)||0).toFixed(2),
-      e.foodDesc||'',
-      e.note||'',
-      new Date(e.ts).toLocaleString('en-NZ')
-    ]);
-  });
-  const totals = huiTotals(t);
-  rows.push([]);
-  rows.push(['','','TOTAL CASH KOHA', totals.cash.toFixed(2)]);
-  rows.push(['','','TOTAL KOHA ENTRIES', totals.total]);
-
-  if((t.expenses||[]).length){
-    rows.push([]);
-    rows.push(['EXPENSES']);
-    rows.push(['#','Date','Description','Amount (NZD)']);
-    const orderedEx = [...t.expenses].sort((a,b)=>a.ts-b.ts);
-    orderedEx.forEach((ex,i)=>{
-      rows.push([i+1, ex.date||'', ex.description||'', (Number(ex.amount)||0).toFixed(2)]);
-    });
-  }
-  rows.push([]);
-  rows.push(['','','TOTAL EXPENSES', totals.expenses.toFixed(2)]);
-  rows.push(['','','NET (CASH KOHA - EXPENSES)', totals.net.toFixed(2)]);
-
-  const csv = rows.map(r => r.map(cell=>{
-    const s = String(cell ?? '');
-    return /[",\n]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s;
-  }).join(',')).join('\n');
-
-  const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  const safeName = (t.name||'hui').replace(/[^a-z0-9]+/gi,'-').toLowerCase();
-  a.href = url;
-  a.download = `koha-${safeName}-${t.date}.csv`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-}
+/* exportCSV() now lives in shared.js — shared with the other two apps. */
 
 /* ---------- Backup / Restore ---------- */
 function backupRestoreCardHtml(){
@@ -249,13 +232,15 @@ function backupData(){
   const blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'});
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
-  const stamp = new Date().toISOString().slice(0,10);
+  const stamp = todayLocal();
   a.href = url;
   a.download = `koha-tracker-offline-backup-${stamp}.json`;
+  try{ localStorage.setItem(LAST_BACKUP_KEY, String(Date.now())); }catch(e){}
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
+  render();
 }
 
 function handleRestoreFile(event){
@@ -297,7 +282,7 @@ function restoreBackup(data){
     if(!t || !t.id || !t.name) return;
     let existing = getHui(t.id);
     if(!existing){
-      existing = { id:t.id, name:t.name, date:t.date||new Date().toISOString().slice(0,10), location:t.location||'', status:t.status||'open', entries:[], expenses:[] };
+      existing = { id:t.id, name:t.name, date:t.date||todayLocal(), location:t.location||'', status:t.status||'open', entries:[], expenses:[] };
       state.hui.push(existing);
     } else {
       existing.name = t.name;
@@ -355,7 +340,7 @@ function closeModal(){
 }
 
 function newHuiModal(){
-  const today = new Date().toISOString().slice(0,10);
+  const today = todayLocal();
   showModal(`
     <h3>Start New Hui</h3>
     <p class="muted">Start a new koha record</p>
@@ -381,7 +366,7 @@ function submitNewHui(){
 }
 
 function addEntryModal(){
-  const defaultDate = new Date().toISOString().slice(0,10);
+  const defaultDate = todayLocal();
   entryModal({ date: defaultDate, type:'cash' }, null);
 }
 
@@ -434,6 +419,7 @@ function submitEntry(){
   const hasFood = !!foodDesc;
 
   if(!name){ alert('Please enter who the koha is from.'); return; }
+  if(amount && Number(amount) < 0){ alert("Amount can't be negative."); return; }
   if(!hasCash && !hasFood){ alert('Please enter a cash amount, a food description, or both.'); return; }
 
   closeModal();
@@ -455,7 +441,7 @@ function submitEntry(){
 }
 
 function addExpenseModal(){
-  const defaultDate = new Date().toISOString().slice(0,10);
+  const defaultDate = todayLocal();
   expenseModal({ date: defaultDate }, null);
 }
 function editExpenseModal(huiId, expenseId){
@@ -489,6 +475,7 @@ function submitExpense(){
   const amount = document.getElementById('xAmount').value;
   const date = document.getElementById('xDate').value;
   if(!description){ alert('Please enter what the expense was for.'); return; }
+  if(amount && Number(amount) < 0){ alert("Amount can't be negative."); return; }
   if(!amount || Number(amount)<=0){
     if(!confirm('No amount entered — save anyway with $0.00?')) return;
   }
@@ -520,7 +507,7 @@ function render(){
     if(!t){ goHome(); return; }
     navBtn.style.display = 'inline-flex';
     headerTitle.textContent = t.name;
-    headerSubtitle.textContent = `${fmtDate(t.date)}${t.location ? ' · '+escapeHtml(t.location) : ''}`;
+    headerSubtitle.textContent = `${fmtDate(t.date)}${t.location ? ' · '+t.location : ''}`;
     app.innerHTML = (view==='summary') ? renderSummary(t) : renderActive(t);
   }
 }
@@ -551,6 +538,7 @@ function renderHome(){
   }).join('');
 
   return `
+    ${backupReminderHtml()}
     <button class="btn btn-primary btn-block" onclick="newHuiModal()" style="margin-bottom:16px;">+ Start New Hui</button>
     <div class="card" style="padding:6px 14px;">
       ${items}
@@ -710,6 +698,23 @@ function renderSummary(t){
       <button class="btn btn-ghost btn-sm" onclick="exportCSV(getHui('${t.id}'))">⬇ CSV</button>
     </div>
   `;
+}
+
+/* ================= Offline support ================= */
+// Register the same service worker the main app uses, so this page (and
+// shared.css / shared.js) is saved on the device and opens with no internet
+// even if index.html has never been opened here. No auto-reload on update —
+// that could wipe a half-typed form; the next open picks up updates anyway.
+if('serviceWorker' in navigator){
+  window.addEventListener('load', ()=> navigator.serviceWorker.register('sw.js').catch(()=>{}));
+}
+
+/* ================= Keep data from being cleared ================= */
+// Ask the browser to treat this site's storage as persistent (not cleared
+// to free space). Only once there's real data, since Firefox may show a
+// one-time prompt. Silently does nothing where unsupported.
+if(state.hui.length && navigator.storage && navigator.storage.persist){
+  navigator.storage.persisted().then(already=>{ if(!already) navigator.storage.persist(); }).catch(()=>{});
 }
 
 /* ================= Boot ================= */
